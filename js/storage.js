@@ -76,6 +76,18 @@
             Object.keys(defaults).forEach(function (k) {
               if (typeof parsed[k] === typeof defaults[k]) out[k] = parsed[k];
             });
+            /* Model tersimpan yang sudah dipensiunkan (ada di GLA.RETIRED_MODELS)
+             * akan membuat app tetap memakai model itu di origin lain (mis.
+             * GitHub Pages, karena localStorage berbeda per-origin) dan bisa
+             * memicu error lama. Jatuh ke default baru supaya konsisten dengan
+             * kode sekarang. Model custom yang diketik manual tidak disentuh. */
+            if (
+              typeof out.model === 'string' &&
+              GLA.RETIRED_MODELS &&
+              GLA.RETIRED_MODELS.indexOf(out.model) !== -1
+            ) {
+              out.model = GLA.DEFAULT_SETTINGS.model;
+            }
           }
         } catch (e) {
           /* data rusak → pakai default */

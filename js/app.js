@@ -31,7 +31,14 @@
     turnComplete: onTurnComplete,
     goAway: onGoAway,
     error: onError,
-    close: onClose
+    close: onClose,
+    searchFallback: function () {
+      UI.toast(
+        'Server menolak web search (kuota grounding). Sesi dilanjutkan tanpa Web search.',
+        'warn',
+        8000
+      );
+    }
   });
 
   /* ---------------------------------------------------------------- state - */

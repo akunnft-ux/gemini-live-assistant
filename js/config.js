@@ -86,6 +86,12 @@
     return null;
   }
 
+  /* Model Live yang pernah jadi default lalu dipensiunkan. Dipakai untuk
+   * migrasi settings lama: kalau localStorage masih menyimpan salah satu id
+   * ini, turunkan ke default baru (mis. setelah default diganti ke
+   * gemini-3.8-live, user di origin lain tetap ikut model terbaru). */
+  var RETIRED_MODELS = ['gemini-3.1-flash-live-preview'];
+
   /* Model yang diketik manual di pengaturan tidak ada di daftar → anggap
    * dukung search (server yang akhirnya memutuskan). */
   function modelSupportsSearch(id) {
@@ -275,6 +281,7 @@
   GLA.modelById = modelById;
   GLA.modelSupportsSearch = modelSupportsSearch;
   GLA.searchEnabled = searchEnabled;
+  GLA.RETIRED_MODELS = RETIRED_MODELS;
 
   GLA.wsUrl = function (apiKey) {
     /* service sudah memuat versi API (…v1beta.GenerativeService…), jangan

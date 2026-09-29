@@ -41,6 +41,7 @@
     if (this.ws) this.close(1000, 'connect ulang');
 
     this.settings = settings;
+    this._searchRetried = false;
     this.state = STATE.CONNECTING;
     this._emit('state', this.state);
 
@@ -94,6 +95,32 @@
       clearTimeout(failTimer);
       var wasReady = self.state === STATE.READY;
       self.ws = null;
+
+      /* 429 + web search aktif + belum pernah dicoba tanpa search → coba sekali
+       * lagi tanpa tool pencarian. Kuota googleSearch grounding di Live API
+       * terpisah dari kuota model (tidak selalu terlihat di dashboard), jadi
+       * koneksi berhak gagal meski kuota utama masih lega. Kalau retry sukses,
+       * berarti benar batas "Google Search grounding" yang kena, dan sesi tetap
+       * jalan (search dimatikan untuk sesi ini saja, bukan setting permanen). */
+      var reason = (ev && ev.reason) || '';
+      var quotaRejected = !wasReady && isQuotaReason(reason);
+      if (
+        quotaRejected &&
+        self.settings &&
+        GLA.searchEnabled(self.settings.searchMode) &&
+        !self._searchRetried
+      ) {
+        self._searchRetried = true;
+        var revised = {};
+        for (var k in self.settings) {
+          if (Object.prototype.hasOwnProperty.call(self.settings, k)) revised[k] = self.settings[k];
+        }
+        revised.searchMode = 'off';
+        self._emit('searchFallback');
+        self.connect(revised);
+        return;
+      }
+
       if (self.state === STATE.CLOSING || (ev.code === 1000 && !timedOut)) {
         self.state = STATE.CLOSED;
       } else {
@@ -403,10 +430,14 @@
     return new Error(lines.join('\n'));
   }
 
+  function isQuotaReason(reason) {
+    return /quota/i.test(reason) || /RESOURCE_EXHAUSTED/i.test(reason);
+  }
+
   function describeClose(ev, wasReady, settings) {
     var reason = (ev && ev.reason) || '';
     if (!wasReady) {
-      if (/quota/i.test(reason) || /RESOURCE_EXHAUSTED/i.test(reason)) {
+      if (isQuotaReason(reason)) {
         return quotaExceededError(reason, settings);
       }
       if (reason) return new Error('Koneksi ditolak: ' + reason);
