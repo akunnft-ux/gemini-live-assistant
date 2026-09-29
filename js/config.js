@@ -60,8 +60,8 @@
    * Hanya model Live non-translate yang mendukungnya. */
   var MODELS = [
     {
-      id: 'gemini-3.1-flash-live-preview',
-      label: 'Gemini 3.1 Flash Live (disarankan)',
+      id: 'gemini-3.8-live',
+      label: 'Gemini 3.8 Live (disarankan)',
       note: 'Model Live terbaru: latensi rendah, 97 bahasa, thinking level.',
       search: true
     },

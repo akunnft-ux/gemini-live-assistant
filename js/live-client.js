@@ -101,7 +101,7 @@
       }
       self._emit('state', self.state);
       if (self.state === STATE.FAILED) {
-        self._emit('error', describeClose(ev, wasReady), ev);
+        self._emit('error', describeClose(ev, wasReady, self.settings), ev);
       }
       self._emit('close', ev, wasReady);
     };
@@ -185,7 +185,7 @@
     }
 
     if (msg.error) {
-      this._emit('error', describeApiError(msg.error), null);
+      this._emit('error', describeApiError(msg.error, this.settings), null);
       return;
     }
 
@@ -327,7 +327,7 @@
 
   /* --------------------------------------------------------------- errors - */
 
-  function describeApiError(err) {
+  function describeApiError(err, settings) {
     var msg = (err && err.message) || 'Kesalahan tidak diketahui dari server.';
     var status = (err && err.status) || '';
     var code = err && err.code;
@@ -341,7 +341,7 @@
       );
     }
     if (code === 429 || status.indexOf('RESOURCE_EXHAUSTED') === 0) {
-      return new Error('Kuota atau rate limit habis. Tunggu sebentar lalu coba lagi.');
+      return quotaExceededError(msg, settings);
     }
     if (code === 404) {
       return new Error(
@@ -371,9 +371,44 @@
     return m ? m[1] : '';
   }
 
-  function describeClose(ev, wasReady) {
+  /* Pesan 429/RESOURCE_EXHAUSTED. Pengalaman Kubernetes nyata (lihat catatan
+   * di editor): error ini kerap BUKAN kuota token model yang habis, tapi batas
+   * terpisah dari Google Search grounding (search tool), yang tidak selalu
+   * tampil di dashboard kuota utama. Beri user langkah konkret, bukan pesan
+   * generik. */
+  function quotaExceededError(msg, settings) {
+    var searchOn = !!settings && GLA.searchEnabled(settings.searchMode);
+    var lines = [
+      'Server menolak koneksi karena kuota (429).',
+      '',
+      'Pesan server: ' + msg
+    ];
+    if (searchOn) {
+      lines.push(
+        '',
+        'Web search (Google Search grounding) aktif. 429 di sini sering bukan ' +
+          'kuota token model yang habis, melainkan batas kuota pencarian web yang ' +
+          'terpisah dan tidak selalu terlihat di dashboard kuota utama.'
+      );
+    }
+    lines.push(
+      '',
+      'Coba:',
+      '1. Tunggu beberapa saat lalu sambungkan lagi (rate limit biasanya pulih dalam menit).',
+      searchOn
+        ? '2. Matikan "Web search" dulu di pengaturan lalu coba sambung — kalau koneksi berhasil, berarti batas pencarian web yang kena.'
+        : '2. Jika kuota di dashboard masih lega, periksa model yang dipilih dan tier billing project.',
+      '3. Cek kuota & billing project di aistudio.google.com → Usage / Rate limits.'
+    );
+    return new Error(lines.join('\n'));
+  }
+
+  function describeClose(ev, wasReady, settings) {
     var reason = (ev && ev.reason) || '';
     if (!wasReady) {
+      if (/quota/i.test(reason) || /RESOURCE_EXHAUSTED/i.test(reason)) {
+        return quotaExceededError(reason, settings);
+      }
       if (reason) return new Error('Koneksi ditolak: ' + reason);
       return new Error(
         'Koneksi ke Live API gagal sebelum sesi siap. Periksa API key, koneksi internet, dan apakah akses WebSocket diblokir jaringan.'
