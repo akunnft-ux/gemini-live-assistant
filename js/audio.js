@@ -44,6 +44,7 @@
     this._capChunk = null;
     this._capFilled = 0;
     this._capScratch = new Float32Array(64);
+    this._capZeros = null;
     this._playRing = null;
     this._playRes = null;
     this._levelTimer = null;
@@ -243,8 +244,18 @@
 
     this.captureNode = this.ctx.createScriptProcessor(4096, 1, 1);
     this.captureNode.onaudioprocess = function (e) {
-      if (self.muted) return;
-      self._ingestInput(e.inputBuffer.getChannelData(0));
+      var ch = e.inputBuffer.getChannelData(0);
+      if (self.muted) {
+        /* Mute = digital silence, bukan hentikan capture (lihat catatan di
+         * worklet.js). Chunk senyap tetap mengalir supaya koneksi WebSocket
+         * tidak menganggur selama assistant bicara. */
+        if (!self._capZeros || self._capZeros.length !== ch.length) {
+          self._capZeros = new Float32Array(ch.length);
+        }
+        self._ingestInput(self._capZeros);
+        return;
+      }
+      self._ingestInput(ch);
     };
     /* ScriptProcessor hanya berjalan kalau terhubung ke destination;
      * sambungkan lewat gain 0 supaya tidak menghasilkan feedback. */
@@ -338,11 +349,11 @@
 
   AudioEngine.prototype.setMuted = function (muted) {
     this.muted = !!muted;
+    if (muted) this.micLevel = 0;
     if (!this.captureNode) return;
     if (this.engine === 'worklet') {
       this.captureNode.port.postMessage(muted ? 'mute' : 'unmute');
     }
-    if (muted) this.micLevel = 0;
   };
 
   /* ---------------------------------------------------------------- stop -- */
@@ -351,6 +362,10 @@
     this.running = false;
     this.micLevel = 0;
     this.playbackLevel = 0;
+    /* WAJIB: state mute harus ikut dibuang. Kalau tidak, sesi berikutnya
+     * mulai dalam keadaan mute (capture di-mute lagi di _setupWorklet) dan
+     * tidak ada yang meng-unmute-nya → mikrofon mati diam-diam. */
+    this.muted = false;
 
     if (this._levelTimer) {
       clearInterval(this._levelTimer);
@@ -415,6 +430,7 @@
     this._capChunk = null;
     this._capLp = null;
     this._capRes = null;
+    this._capZeros = null;
     this._playRing = null;
     this._playRes = null;
     this.engine = 'none';

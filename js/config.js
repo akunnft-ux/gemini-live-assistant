@@ -36,6 +36,25 @@
     warnBeforeMs: 60 * 1000
   };
 
+  /* ------------------------------------------------------------ RECONNECT -- */
+  /* Server Live APIMEMATIKAN WebSocket secara berkala (batas durasi per
+   * koneksi, rotation, atau drop jaringan). Koneksi yang putus TIDAK berarti
+   * sesi berakhir: dengan `sessionResumption` di setup, sambungan baru bisa
+   * melanjutkan konteks percakapan yang sama lewat handle. Jadi ini pengaman
+   * koneksi, bukan fitur tambahan — tanpa ini user kehilangan sesi secara
+   * acak, kadang jauh sebelum 15 menit. */
+  var RECONNECT = {
+    /* Tunggu sebentar setelah goAway, lalu pindah koneksi lebih dulu daripada
+     * menunggu server menutup paksa (menjaga jeda tetap pendek). */
+    goAwayDelayMs: 3000,
+    /* Backoff percobaan sambung ulang (ms). */
+    backoffMs: [1200, 2500, 5000, 9000, 15000],
+    /* Handle resumption hanya dipakai selama ini setelah sesi berakhir.
+     * Server menyimpan token 2 jam; 90 menit lebih dari cukup dan membuat
+     * handle basi dibuang sendiri. */
+    resumptionTtlMs: 90 * 60 * 1000
+  };
+
   /* --------------------------------------------------------------- VAD ---- */
   /* Barge-in: model's Voice Activity Detection menentukan kapan giliran
    * bicara. START_OF_ACTIVITY_INTERRUPTS = suara user selalu memutus
@@ -271,6 +290,7 @@
 
   GLA.API = API;
   GLA.AUDIO = AUDIO;
+  GLA.RECONNECT = RECONNECT;
   GLA.VAD = VAD;
   GLA.MODELS = MODELS;
   GLA.VOICES = VOICES;

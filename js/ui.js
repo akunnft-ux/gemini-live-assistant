@@ -34,6 +34,27 @@
     return n ? sum / n / 255 : 0;
   }
 
+  /* Cari link sumber yang sudah ada. PENTING: jangan pakai
+   * `card.querySelector('a[href="' + url + '"]')` — URL dari grounding server
+   * bisa mengandung karakter khusus selector CSS (spasi, " , ], \) yang
+   * membuat querySelector melempar DOMException dan mematikan seluruh
+   * onSources. Bandingkan atributnya secara manual. */
+  function hasSource(card, url) {
+    var links = card.querySelectorAll('a.msg__source');
+    for (var i = 0; i < links.length; i++) {
+      if (links[i].getAttribute('href') === url) return true;
+    }
+    return false;
+  }
+
+  var MIC_LABELS = {
+    idle: 'Mulai',
+    loading: 'Menyiapkan…',
+    live: 'Akhiri',
+    ending: 'Mengakhiri…',
+    reconnecting: 'Menyambung ulang…'
+  };
+
   var UI = {
     init: function () {
       $('fWebSearch').addEventListener('change', function () {
@@ -96,10 +117,12 @@
     },
 
     setMicMode: function (mode) {
-      /* mode: 'idle' | 'loading' | 'live' | 'ending' */
+      /* mode: 'idle' | 'loading' | 'live' | 'ending' | 'reconnecting' */
       el.micBtn.className = 'mic mic--' + mode;
-      el.micBtn.setAttribute('aria-busy', mode === 'loading' ? 'true' : 'false');
+      el.micBtn.setAttribute('aria-busy', mode === 'loading' || mode === 'reconnecting' ? 'true' : 'false');
       el.micBtn.disabled = mode === 'loading' || mode === 'ending';
+      var label = el.micBtn.querySelector('.mic__label');
+      if (label) label.textContent = MIC_LABELS[mode] || MIC_LABELS.idle;
     },
 
     setSpeaking: function (who) {
@@ -215,7 +238,7 @@
 
       for (var i = 0; i < sources.length; i++) {
         var url = sources[i].uri;
-        if (card.querySelector('a[href="' + url + '"]')) continue;
+        if (!url || hasSource(card, url)) continue;
         var a = document.createElement('a');
         a.className = 'msg__source';
         a.href = url;
@@ -287,6 +310,10 @@
     startVisualizer: function (getFrame) {
       var smooth = new Float32Array(BAR_COUNT);
 
+      /* Idempoten: guard agar loop rAF ganda tidak pernah terjadi (dua loop
+       * akan menulis transform bar bersamaan dan boros CPU). */
+      if (rafId) return;
+
       function draw() {
         rafId = requestAnimationFrame(draw);
         var frame = getFrame();
@@ -338,7 +365,6 @@
         userName: $('fUserName').value.trim(),
         muteMicWhileSpeaking: $('fMuteWhileSpeaking').checked,
         vadSensitivity: $('fVad').value,
-        webSearch: $('fWebSearch').checked,
         searchMode: $('fWebSearch').checked ? $('fSearchMode').value : 'off'
       };
     },

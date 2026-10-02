@@ -28,20 +28,57 @@
     this.state = STATE.IDLE;
     this.settings = null;
     this.droppedChunks = 0;
+
+    /* Handle resumption dari server (lihat _route). Dipakai lagi di setup
+     * sambungan berikutnya supaya konteks percakapan tidak hilang. */
+    this.resumeHandle = null;
+    this.resumeAt = 0;
+    /* Nomor generasi koneksi. Event dari socket lama (yang onclose-nya datang
+     * async) diabaikan supaya tidak merusak state koneksi yang baru. */
+    this._gen = 0;
+    this.intentionalClose = false;
+    this.sawGoAway = false;
+    this.lastClose = null;
+    this._resumed = false;
   }
 
-  LiveClient.prototype._emit = function (name, arg1, arg2) {
-    if (typeof this.h[name] === 'function') this.h[name](arg1, arg2);
+  LiveClient.prototype._emit = function (name, arg1, arg2, arg3) {
+    if (typeof this.h[name] === 'function') this.h[name](arg1, arg2, arg3);
   };
 
   /* ------------------------------------------------------------- connect -- */
 
-  LiveClient.prototype.connect = function (settings) {
+  /* opts.fresh : buang handle resumption → sesi benar-benar baru.
+   *              Default (tanpa opts) = lanjutkan sesi pakai handle yang
+   *              tersimpan; itulah yang dipakai saat sambung ulang. */
+  LiveClient.prototype.connect = function (settings, opts) {
     var self = this;
-    if (this.ws) this.close(1000, 'connect ulang');
+    opts = opts || {};
+
+    if (opts.fresh) this.resetResume();
+    else this._pruneResume();
+
+    /* Pindah koneksi: naikkan nomor generasi DAN lepas socket lama SEBELUM
+     * apa pun yang bisa memicu callback. Urutan ini penting — kalau socket
+     * lama ditutup lebih dulu, onclose-nya masih lolos guard dan
+     * memancarkan state CLOSED, yang membuat orkestrator menganggur sesi
+     * (lalu membuang handle resumption tepat sebelum setup baru dikirim →
+     * konteks percakapan hilang). Dengan nomor generasi dinaikkan lebih dulu,
+     * semua event socket lama diabaikan begitu saja. */
+    var gen = ++this._gen;
+    var prev = this.ws;
+    this.ws = null;
+    if (prev) {
+      try {
+        prev.close(1000, 'ganti koneksi');
+      } catch (e) {}
+    }
 
     this.settings = settings;
     this._searchRetried = false;
+    this.sawGoAway = false;
+    this.intentionalClose = false;
+    this._resumed = !!this.resumeHandle;
     this.state = STATE.CONNECTING;
     this._emit('state', this.state);
 
@@ -50,14 +87,30 @@
     try {
       ws = new global.WebSocket(url);
     } catch (e) {
+      /* URL rusak / WebSocket diblokir total. Tetap pancarkan event 'close'
+       * dengan lastClose yang lengkap — kalau tidak, orkestrator tidak tahu
+       * harus mengembalikan UI ke idle dan tombol mikrofon macet di
+       * "Menyiapkan". */
       this.state = STATE.FAILED;
+      this.lastClose = {
+        code: 0,
+        reason: (e && e.message) || '',
+        wasReady: false,
+        intentional: false,
+        timedOut: false,
+        goAway: false,
+        retryable: false
+      };
       this._emit('state', this.state);
       this._emit(
         'error',
-        new Error(
-          'Tidak bisa membuka koneksi WebSocket. Jika aplikasi dibuka langsung dari file (file://), buka lewat server lokal atau GitHub Pages.'
-        )
+        fail(
+          'Tidak bisa membuka koneksi WebSocket. Jika aplikasi dibuka langsung dari file (file://), buka lewat server lokal atau GitHub Pages.',
+          false
+        ),
+        null
       );
+      this._emit('close', { code: 0, reason: '' }, false, this.lastClose);
       return;
     }
     this.ws = ws;
@@ -71,7 +124,7 @@
 
     var timedOut = false;
     var failTimer = setTimeout(function () {
-      if (self.state === STATE.CONNECTING) {
+      if (self._gen === gen && self.state === STATE.CONNECTING) {
         timedOut = true;
         try {
           ws.close();
@@ -80,10 +133,12 @@
     }, 30000);
 
     ws.onopen = function () {
-      self._send(setupMessage(settings));
+      if (self._gen !== gen) return;
+      self._send(setupMessage(settings, self.resumeHandle));
     };
 
     ws.onmessage = function (ev) {
+      if (self._gen !== gen) return;
       self._onFrame(ev.data);
     };
 
@@ -93,7 +148,11 @@
 
     ws.onclose = function (ev) {
       clearTimeout(failTimer);
+      /* Socket lama: jangan sentuh state koneksi yang sedang berjalan. */
+      if (self._gen !== gen) return;
+
       var wasReady = self.state === STATE.READY;
+      var intentional = self.intentionalClose;
       self.ws = null;
 
       /* 429 + web search aktif + belum pernah dicoba tanpa search → coba sekali
@@ -103,7 +162,7 @@
        * berarti benar batas "Google Search grounding" yang kena, dan sesi tetap
        * jalan (search dimatikan untuk sesi ini saja, bukan setting permanen). */
       var reason = (ev && ev.reason) || '';
-      var quotaRejected = !wasReady && isQuotaReason(reason);
+      var quotaRejected = !wasReady && !intentional && isQuotaReason(reason);
       if (
         quotaRejected &&
         self.settings &&
@@ -111,27 +170,66 @@
         !self._searchRetried
       ) {
         self._searchRetried = true;
-        var revised = {};
-        for (var k in self.settings) {
-          if (Object.prototype.hasOwnProperty.call(self.settings, k)) revised[k] = self.settings[k];
-        }
+        var revised = cloneSettings(self.settings);
         revised.searchMode = 'off';
+        /* Sesi tanpa search tidak bisa mewarisi sesi yang memakai tool
+         * search → jangan pakai handle resumption di sini. */
+        self.resetResume();
         self._emit('searchFallback');
         self.connect(revised);
         return;
       }
 
-      if (self.state === STATE.CLOSING || (ev.code === 1000 && !timedOut)) {
+      /* CLOSED hanya untuk penutupan yang benar-benar diminta. Socket yang
+       * ditutup server (goAway, rotasi, atau masalah jaringan) juga kode 1000
+       * dan itu HARUS diperlakukan sebagai kegagalan supaya orkestrator
+       * menyambung ulang — inilah penyebab sesi hilang sebelum 15 menit. */
+      if (intentional) {
         self.state = STATE.CLOSED;
       } else {
         self.state = STATE.FAILED;
       }
+
+      self.lastClose = {
+        code: ev ? ev.code : 0,
+        reason: reason,
+        wasReady: wasReady,
+        intentional: intentional,
+        timedOut: timedOut,
+        goAway: self.sawGoAway
+      };
+
       self._emit('state', self.state);
       if (self.state === STATE.FAILED) {
-        self._emit('error', describeClose(ev, wasReady, self.settings), ev);
+        var err = describeClose(ev, wasReady, self.settings, timedOut, self.sawGoAway);
+        /* retryable = layak disambung ulang. Dipakai app.js supaya sesi yang
+         * kehabisan handle / gagal connect tidak ikut mencoba terus-menerus. */
+        self.lastClose.retryable = err.retryable === true;
+        self._emit('error', err, ev);
       }
-      self._emit('close', ev, wasReady);
+      self._emit('close', ev, wasReady, self.lastClose);
     };
+  };
+
+  function cloneSettings(s) {
+    var out = {};
+    for (var k in s) {
+      if (Object.prototype.hasOwnProperty.call(s, k)) out[k] = s[k];
+    }
+    return out;
+  }
+
+  /* Buang handle kalau sudah basi supaya server tidak ditolak dengan
+   * handle yang sudah kedaluwarsa (Server: token valid 2 jam). */
+  LiveClient.prototype._pruneResume = function () {
+    if (this.resumeHandle && Date.now() - this.resumeAt > GLA.RECONNECT.resumptionTtlMs) {
+      this.resetResume();
+    }
+  };
+
+  LiveClient.prototype.resetResume = function () {
+    this.resumeHandle = null;
+    this.resumeAt = 0;
   };
 
   /* Terima frame teks maupun binary (server memakai keduanya). */
@@ -161,7 +259,7 @@
 
   /* --------------------------------------------------------------- setup -- */
 
-  function setupMessage(s) {
+  function setupMessage(s, resumeHandle) {
     var vad = {
       automaticActivityDetection: {
         disabled: false,
@@ -188,7 +286,16 @@
       },
       realtimeInputConfig: vad,
       inputAudioTranscription: {},
-      outputAudioTranscription: {}
+      outputAudioTranscription: {},
+
+      /* WAJIB ada, bahkan pada sambungan pertama. Field ini yang menyuruh
+       * server mengirim `sessionResumptionUpdate{newHandle,resumable}` secara
+       * berkala. Tanpa field ini server TIDAK PERNAH mengirim handle, dan saat
+       * socket ditutup (batas durasi per koneksi, rotasi, atau drop jaringan)
+       * konteks percakapan hilang permanen — itulah penyebab sesi terputus
+       * sebelum 15 menit. Isi `handle` hanya pada sambungan lanjutan supaya
+       * konteks sebelumnya diteruskan; kosong = sesi baru yang tetap resummable. */
+      sessionResumption: resumeHandle ? { handle: resumeHandle } : {}
     };
 
     /* Grounding with Google Search. Penanganannya sepenuhnya di server:
@@ -207,7 +314,8 @@
     if (msg.setupComplete) {
       this.state = STATE.READY;
       this._emit('state', this.state);
-      this._emit('ready');
+      /* argumen: true bila sambungan ini melanjutkan sesi sebelumnya. */
+      this._emit('ready', this._resumed === true);
       return;
     }
 
@@ -217,12 +325,23 @@
     }
 
     if (msg.goAway) {
+      /* Peringatan server: socket akan ditutup. Jangan tunggu — pindahkan
+       * koneksi lebih dulu (dengan resumption) supaya konteks aman. */
+      this.sawGoAway = true;
       this._emit('goAway', msg.goAway.timeLeft || 'sebentar');
       return;
     }
 
     if (msg.sessionResumptionUpdate) {
-      this._emit('resumable', msg.sessionResumptionUpdate);
+      var up = msg.sessionResumptionUpdate;
+      /* Hanya adopsi handle yang ditandai resumable. Server juga mengirim
+       * checkpoint sementara dengan resumable=false / newHandle kosong —
+       * memakai yang itu akan me-resume ke state yang tidak valid. */
+      if (up && up.resumable === true && up.newHandle) {
+        this.resumeHandle = up.newHandle;
+        this.resumeAt = Date.now();
+      }
+      this._emit('resumable', up);
       return;
     }
 
@@ -336,6 +455,7 @@
   /* ---------------------------------------------------------------- close - */
 
   LiveClient.prototype.close = function (code, reason) {
+    this.intentionalClose = true;
     if (!this.ws) {
       this.state = STATE.CLOSED;
       this._emit('state', this.state);
@@ -352,7 +472,32 @@
     }
   };
 
+  /* Tutup socket sekarang agar orchestrator menyambung ulang dengan
+   * resumption — dipakai saat batas durasi per koneksi tercapai. Berbeda dari
+   * close(): ini BUKAN akhir sesi, jadi tidak ditandai intentional dan state
+   * tidak diubah (orkestrator yang menyambung lagi). */
+  LiveClient.prototype.rotate = function (reason) {
+    if (!this.ws) return false;
+    this.intentionalClose = false;
+    this.sawGoAway = true;
+    try {
+      this.ws.close(1000, reason || 'rotasi');
+    } catch (e) {
+      return false;
+    }
+    return true;
+  };
+
   /* --------------------------------------------------------------- errors - */
+
+  /* Error dengan penanda `retryable`: orkestrator (app.js) hanya menyambung
+   * ulang untuk error yang layak dicoba lagi. Key salah / kuota habis bukan
+   * masalah sesaat, jadi mencoba lagi hanya membuang kuota dan membuat loop. */
+  function fail(message, retryable) {
+    var e = new Error(message);
+    e.retryable = !!retryable;
+    return e;
+  }
 
   function describeApiError(err, settings) {
     var msg = (err && err.message) || 'Kesalahan tidak diketahui dari server.';
@@ -360,37 +505,43 @@
     var code = err && err.code;
 
     if (code === 401 || status.indexOf('UNAUTHENTICATED') === 0) {
-      return new Error('API key ditolak. Periksa kembali key di pengaturan.');
+      return fail('API key ditolak. Periksa kembali key di pengaturan.', false);
     }
     if (code === 403 || status.indexOf('PERMISSION_DENIED') === 0) {
-      return new Error(
-        'API key tidak punya izin. Pastikan Generative Language API aktif di project key tersebut.'
+      return fail(
+        'API key tidak punya izin. Pastikan Generative Language API aktif di project key tersebut.',
+        false
       );
     }
     if (code === 429 || status.indexOf('RESOURCE_EXHAUSTED') === 0) {
       return quotaExceededError(msg, settings);
     }
     if (code === 404) {
-      return new Error(
+      return fail(
         'Model "' +
           (currentModelLabel(msg) || 'yang dipilih') +
-          '" tidak tersedia untuk API key ini. Coba model lain di pengaturan.'
+          '" tidak tersedia untuk API key ini. Coba model lain di pengaturan.',
+        false
       );
     }
     if (code === 400 || status.indexOf('INVALID_ARGUMENT') === 0) {
       if (/voice/i.test(msg)) {
-        return new Error(
-          'Suara yang dipilih tidak didukung model ini. Buka pengaturan lalu pilih "Otomatis".'
+        return fail(
+          'Suara yang dipilih tidak didukung model ini. Buka pengaturan lalu pilih "Otomatis".',
+          false
         );
       }
       if (/tool|google_?search|grounding/i.test(msg)) {
-        return new Error(
-          'Model yang dipilih tidak menerima tool pencarian web. Matikan "Web search" di pengaturan, atau pilih model Live lain.'
+        return fail(
+          'Model yang dipilih tidak menerima tool pencarian web. Matikan "Web search" di pengaturan, atau pilih model Live lain.',
+          false
         );
       }
-      return new Error('Permintaan ditolak server: ' + msg);
+      return fail('Permintaan ditolak server: ' + msg, false);
     }
-    return new Error('Server Live API: ' + msg);
+    /* Error di tengah sesi (server internal / overloaded) sering ikut menutup
+     * socket; resumption biasanya memulihkannya. */
+    return fail('Server Live API: ' + msg, true);
   }
 
   function currentModelLabel(msg) {
@@ -427,28 +578,45 @@
         : '2. Jika kuota di dashboard masih lega, periksa model yang dipilih dan tier billing project.',
       '3. Cek kuota & billing project di aistudio.google.com → Usage / Rate limits.'
     );
-    return new Error(lines.join('\n'));
+    return fail(lines.join('\n'), false);
   }
 
   function isQuotaReason(reason) {
     return /quota/i.test(reason) || /RESOURCE_EXHAUSTED/i.test(reason);
   }
 
-  function describeClose(ev, wasReady, settings) {
+  /* Retryable hanya untuk kegagalan sesaat:
+   *   - timeout handshake  → jaringan lambat
+   *   - socket belum siap  → jaringan/WSS diblokir, sering sementara
+   *   - sesi sudah jalan lalu putus / goAway → resumption + backoff
+   * Key salah, kuota habis, dan parameter setup salah TIDAK retryable. */  function describeClose(ev, wasReady, settings, timedOut, sawGoAway) {
     var reason = (ev && ev.reason) || '';
+    if (timedOut) {
+      return fail(
+        'Server tidak menjawab dalam 30 detik. Periksa koneksi internet, lalu coba lagi.',
+        true
+      );
+    }
     if (!wasReady) {
       if (isQuotaReason(reason)) {
         return quotaExceededError(reason, settings);
       }
-      if (reason) return new Error('Koneksi ditolak: ' + reason);
-      return new Error(
-        'Koneksi ke Live API gagal sebelum sesi siap. Periksa API key, koneksi internet, dan apakah akses WebSocket diblokir jaringan.'
+      if (reason) return fail('Koneksi ditolak: ' + reason, false);
+      return fail(
+        'Koneksi ke Live API gagal sebelum sesi siap. Periksa API key, koneksi internet, dan apakah akses WebSocket diblokir jaringan.',
+        true
       );
     }
-    if (reason) return new Error('Sesi terputus: ' + reason);
-    return new Error(
-      'Sesi terputus (kode ' + (ev ? ev.code : '?') + '). Mulai ulang untuk melanjutkan.'
-    );
+    if (sawGoAway) {
+      return fail(
+        'Server menutup sesi karena batas durasi koneksi' +
+          (reason ? ' (' + reason + ')' : '') +
+          '. Menyambung ulang dan melanjutkan percakapan…',
+        true
+      );
+    }
+    if (reason) return fail('Sesi terputus: ' + reason + '. Menyambung ulang…', true);
+    return fail('Sesi terputus (kode ' + (ev ? ev.code : '?') + '). Menyambung ulang…', true);
   }
 
   GLA.LiveClient = LiveClient;

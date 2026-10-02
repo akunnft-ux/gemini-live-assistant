@@ -43,41 +43,81 @@
 
   /* ---------------------------------------------------------------- state - */
 
-  var session = 'idle'; /* idle | loading | live | stopping */
+  /* Sesi live TIDAK melekat pada satu koneksi WebSocket: server menutup socket
+   * secara berkala (batas durasi per koneksi, rotasi, atau drop jaringan) —
+   * sering kali jauh sebelum 15 menit. Karena itu `session` punya status
+   * 'reconnecting' dan sambungan boleh berganti di tengah 'live' tanpa mereset
+   * transkrip:
+   *   idle | loading | live | reconnecting | stopping                        */
+  var session = 'idle';
   var userBuf = '';
   var aiBuf = '';
-  var startedAt = 0;
+  var startedAt = 0; /* epoch awal sesi — durasi kumulatif lintas sambung ulang */
+  var connStartedAt = 0; /* epoch sambungan aktif → batas 15 menit per koneksi */
   var tickTimer = null;
   var warnedLimit = false;
   var mutedByAi = false;
   var unmuteTimer = null;
   var endedByUser = false;
 
+  /* orkestrasi sambung ulang */
+  var reconnectTimer = null;
+  var reconnectAttempt = 0;
+  var totalReconnects = 0;
+  /* True selama user masih ingin sesi hidup — mencegah event yang datang
+   * terlambat (onclose dari socket lama) membangkitkan sesi lagi. */
+  var wantSession = false;
+
   /* ------------------------------------------------------------- handlers - */
 
   function onStateChange(state) {
     if (state === GLA.LIVE_STATE.CONNECTING) {
-      UI.setStatus('busy', 'Menghubungkan');
-      UI.setStateLabel('Menyambungkan ke Gemini…');
+      if (session !== 'reconnecting') {
+        UI.setStatus('busy', 'Menghubungkan');
+        UI.setStateLabel('Menyambungkan ke Gemini…');
+      }
     } else if (state === GLA.LIVE_STATE.CLOSING) {
       UI.setStatus('busy', 'Mengakhiri');
     } else if (state === GLA.LIVE_STATE.CLOSED) {
-      if (session !== 'idle') teardownUi();
+      /* CLOSED di tengah reconnect = socket lama sedang dilepas, bukan akhir
+       * sesi. Jangan ikut menganggur di sini atau handle resumption ikut
+       * terhapus sebelum setup koneksi baru dikirim. */
+      if (session !== 'idle' && session !== 'reconnecting') teardownUi();
     } else if (state === GLA.LIVE_STATE.FAILED) {
-      if (session !== 'idle') teardownUi();
+      /* Biarkan onClose yang memutuskan: error sesaat akan disambung ulang. */
     }
   }
 
-  function onReady() {
+  function onReady(isResume) {
+    var fresh = !startedAt;
     session = 'live';
-    startedAt = Date.now();
+    connStartedAt = Date.now();
+    if (fresh) startedAt = connStartedAt;
     warnedLimit = false;
+    clearReconnect();
+
     UI.setStatus('live', 'Live');
-    UI.setStateLabel('Ngobrol bebas — spoke saja, assistant akan menjawab.');
+    UI.setStateLabel(
+      isResume
+        ? 'Sesi dilanjutkan — assistant ingat sebelumnya. Lanjut ngobrol.'
+        : 'Ngobrol bebas — spoke saja, assistant akan menjawab.'
+    );
     UI.setMicMode('live');
-    UI.setTimer(0);
-    tickTimer = setInterval(tick, 1000);
-    UI.toast('Sesi live dimulai. Bicara apa saja — maksimal 15 menit.', 'ok', 4200);
+    UI.setTimer(Date.now() - startedAt);
+    /* WAJIB: timer lama dibuang dulu. Tanpa ini setiap sambung ulang
+     * menambah interval baru → timer berjalan beberapa kali lipat cepat. */
+    startTicker();
+
+    if (isResume) {
+      totalReconnects++;
+      UI.toast(
+        'Koneksi server diputus — sesi dilanjutkan tanpa kehilangan konteks.',
+        'ok',
+        4000
+      );
+    } else if (fresh) {
+      UI.toast('Sesi live dimulai. Bicara apa saja.', 'ok', 4200);
+    }
   }
 
   function onUserText(text) {
@@ -122,23 +162,119 @@
   }
 
   function onGoAway(timeLeft) {
+    /* Server memberi tahu socket akan ditutup dalam `timeLeft`. Jangan tunggu
+     * ditutup paksa — pindah koneksi sekarang dengan resumption supaya
+     * konteks aman dan jeda tetap pendek. */
     UI.toast(
-      'Sesi akan ditutup server dalam ' + timeLeft + '. Selesaikan percakapan, lalu tekan Mikrofon lagi.',
+      'Server akan menutup koneksi dalam ' +
+        timeLeft +
+        '. Melanjutkan sesi di koneksi baru…',
       'warn',
       9000
     );
+    scheduleReconnect(GLA.RECONNECT.goAwayDelayMs, 'Server akan menutup koneksi.');
   }
 
   function onError(err) {
-    UI.toast(err.message, 'error', 9000);
+    /* Error selama sesi berjalan hampir selalu berarti socket diputus server.
+     * Kalau layak dicoba lagi, onClose yang akan menyambung ulang — cukup
+     * toast peringatan, jangan kunci UI di status error. */
+    var duringSession =
+      session === 'live' || session === 'loading' || session === 'reconnecting';
+    UI.toast(err.message, err.retryable === true ? 'warn' : 'error', 9000);
+    if (duringSession) return;
     UI.setStatus('error', 'Gagal');
     UI.setStateLabel('Terjadi kesalahan. Buka Pengaturan atau coba lagi.');
   }
 
-  function onClose(ev, wasReady) {
-    if (session === 'live' && wasReady && ev && ev.code === 1000 && endedByUser) {
-      UI.toast('Sesi selesai.', 'ok', 2500);
+  function onClose(ev, wasReady, info) {
+    if (!info) info = {};
+    if (info.intentional) {
+      if (session === 'live' && ev && ev.code === 1000 && endedByUser) {
+        UI.toast('Sesi selesai.', 'ok', 2500);
+      }
+      return;
     }
+
+    if (!wantSession || session === 'stopping' || session === 'idle') return;
+
+    /* Sambung ulang hanya untuk kegagalan sesaat. Key salah / kuota habis /
+     * setup ditolak sudah ditandai retryable=false oleh live-client — mencoba
+     * lagi hanya membuang kuota. Untuk kasus itu kembalikan UI ke idle agar
+     * tidak macet di "Menyiapkan"/"Menyambung ulang". */
+    if (info.retryable !== true) {
+      wantSession = false;
+      session = 'idle';
+      teardownUi();
+      if (!wasReady) {
+        UI.setStateLabel('Tidak bisa menyambung. Periksa API key & pengaturan, lalu coba lagi.');
+      } else {
+        UI.setStateLabel('Sesi dihentikan server. Tekan mikrofon untuk mulai lagi.');
+      }
+      return;
+    }
+
+    /* Kalau sesi belum pernah benar-benar hidup (connect gagal), coba sedikit
+     * saja supaya user tidak menunggu lama pada koneksi yang memang salah. */
+    var budget = wasReady ? GLA.RECONNECT.backoffMs.length : 2;
+    if (reconnectAttempt >= budget) {
+      wantSession = false;
+      session = 'idle';
+      teardownUi();
+      UI.toast(
+        'Koneksi Live API terputus dan tidak berhasil disambung ulang. Tekan mikrofon untuk coba lagi.',
+        'error',
+        10000
+      );
+      return;
+    }
+
+    scheduleReconnect();
+  }
+
+  /* ------------------------------------------------- sambung ulang (reconnect) */
+
+  function scheduleReconnect(delayMs, reason) {
+    if (!wantSession || session === 'stopping') return;
+    clearReconnect();
+
+    var i = reconnectAttempt;
+    var delay = delayMs != null ? delayMs : GLA.RECONNECT.backoffMs[Math.min(i, GLA.RECONNECT.backoffMs.length - 1)];
+    reconnectAttempt++;
+
+    session = 'reconnecting';
+    /* Simpan partial supaya tidak ada kalimat yang menggantung di bubble
+     * "live" ketika sambungan baru mulai. */
+    commitUser();
+    commitAi();
+    audio.clearOutput();
+
+    UI.setStatus('busy', 'Menyambung ulang');
+    UI.setMicMode('reconnecting');
+    UI.setStateLabel(
+      'Koneksi terputus — menyambung ulang' +
+        (delay > 1500 ? ' dalam ' + Math.round(delay / 1000) + ' dtk' : '') +
+        '…'
+    );
+
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      if (!wantSession) return;
+      /* handle resumption (kalau ada) ikut di setup → konteks diteruskan. */
+      client.connect(settings);
+    }, delay);
+  }
+
+  function clearReconnect() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function startTicker() {
+    if (tickTimer) clearInterval(tickTimer);
+    tickTimer = setInterval(tick, 1000);
   }
 
   function commitUser() {
@@ -158,16 +294,26 @@
   /* ---------------------------------------------------------------- timer - */
 
   function tick() {
-    var elapsed = Date.now() - startedAt;
-    UI.setTimer(elapsed);
+    if (session !== 'live' && session !== 'reconnecting') return;
+    var now = Date.now();
+    /* Timer menampilkan durasi kumulatif (termasuk waktu reconnect) supaya
+     * user melihat total waktu ngobrol. */
+    UI.setTimer(now - startedAt);
+
+    /* Batas 15 menit itu per KONEKSI, bukan per sesi. Jadi jangan tutup sesi:
+     * pindah koneksi (resumption) dan jam server mulai dari nol lagi. */
+    var connElapsed = now - connStartedAt;
     var limit = GLA.AUDIO.sessionLimitMs;
-    if (!warnedLimit && elapsed > limit - GLA.AUDIO.warnBeforeMs) {
+    if (!warnedLimit && connElapsed > limit - GLA.AUDIO.warnBeforeMs) {
       warnedLimit = true;
-      UI.toast('Sesi akan mencapai batas 15 menit. Bersiap menyimpan transkrip.', 'warn', 8000);
+      UI.toast('Batas 15 menit per koneksi hampir habis. Sesi akan disambung otomatis.', 'warn', 8000);
     }
-    if (elapsed >= limit) {
-      endedByUser = false;
-      stopSession('Sesi mencapai batas 15 menit dari server Live API.');
+    if (connElapsed >= limit) {
+      warnedLimit = false;
+      UI.toast('Batas durasi koneksi tercapai — pindah koneksi, sesi tetap lanjut.', 'info', 6000);
+      /* rotate() menutup socket tanpa menandai "permintaan user", sehingga
+       * onClose menjadwalkan sambung ulang dengan resumption. */
+      if (!client.rotate('batas durasi koneksi')) scheduleReconnect(0, 'rotasi');
     }
   }
 
@@ -209,7 +355,12 @@
     if (UI.isSettingsOpen()) return;
 
     session = 'loading';
+    wantSession = true;
     endedByUser = false;
+    reconnectAttempt = 0;
+    totalReconnects = 0;
+    startedAt = 0;
+    connStartedAt = 0;
     userBuf = aiBuf = '';
     UI.setMicMode('loading');
     UI.setStatus('busy', 'Menyiapkan');
@@ -226,10 +377,13 @@
         var badges = [engine === 'worklet' ? 'AudioWorklet' : 'ScriptProcessor (cadangan)'];
         if (GLA.searchEnabled(settings.searchMode)) badges.push('Web search');
         UI.setEngineBadge(badges.join(' · '));
-        client.connect(settings);
+        /* fresh: sesi baru → jangan pakai handle resumption sesi lama. */
+        client.connect(settings, { fresh: true });
       })
       .catch(function (err) {
         session = 'idle';
+        wantSession = false;
+        audio.stop();
         UI.setMicMode('idle');
         UI.setStatus('error', 'Gagal');
         UI.setStateLabel('Tidak bisa memulai sesi.');
@@ -240,6 +394,10 @@
   function stopSession(reason) {
     if (session === 'idle' || session === 'stopping') return;
     session = 'stopping';
+    /* Cancel semua percobaan sambung ulang lebih dulu, kalau tidak timer
+     * reconnect yang sudah terjadwal akan membangunkan sesi lagi. */
+    wantSession = false;
+    clearReconnect();
     endedByUser = true;
     UI.setMicMode('ending');
     UI.setStateLabel('Mengakhiri sesi…');
@@ -259,6 +417,8 @@
 
   function teardownUi() {
     session = 'idle';
+    wantSession = false;
+    clearReconnect();
     if (tickTimer) {
       clearInterval(tickTimer);
       tickTimer = null;
@@ -268,7 +428,16 @@
       unmuteTimer = null;
     }
     mutedByAi = false;
+    /* PENTING: audio engine mungkin masih dalam keadaan mute (dari
+     * muteMicWhileSpeaking). Kalau tidak di-unmute di sini, sesi BERIKUTNYA
+     * mulai dengan mikrofon mati permanen karena setMuted(true) pernah
+     * dipanggil dan tidak pernah dilawan. */
+    audio.setMuted(false);
     userBuf = aiBuf = '';
+    startedAt = 0;
+    connStartedAt = 0;
+    reconnectAttempt = 0;
+    client.resetResume();
     UI.setTimer(null);
     UI.setMicMode('idle');
     UI.setSpeaking('');

@@ -160,27 +160,30 @@
   /* Utilitas konversi — hanya di halaman utama                              */
   /* ======================================================================== */
 
-  function int16ToFloat32(int16) {
-    var out = new Float32Array(int16.length);
-    for (var i = 0; i < int16.length; i++) {
-      out[i] = int16[i] < 0 ? int16[i] / 32768 : int16[i] / 32767;
-    }
-    return out;
-  }
-
-  var B64_CHUNK = 0x8000;
+  /* Batas argumen untuk String.fromCharCode.apply. Beberapa engine (terutama
+   * Safari lama) melempar RangeError kalau jumlah elemennya terlalu besar, dan
+   * AudioWorklet tidak punya jalur base64 lain.
+   *
+   * WAJIB kelipatan 3. Base16 di-encode per potongan, jadi hanya potongan
+   * terakhir boleh punya padding '='. Kalau ukuran potongan bukan kelipatan 3,
+   * setiap potongan selain terakhir menghasilkan padding di tengah hasil —
+   * dan string seperti "AAA=AAA=" BUKAN base64 yang valid: server memotongnya
+   * di '=' pertama sehingga audio rusak atau frame ditolak. Dengan kelipatan 3
+   * semua potongan middle bebas padding dan penggabungannya lossless.
+   *
+   * 8190 = 3 × 2730. Chunk audio 200 ms = 6400 byte, jadi di pemakaian normal
+   * ini tetap satu kali panggilan (tanpa overhead loop). */
+  var B64_CHUNK = 8190;
 
   function toBase64(int16) {
     var bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+    if (bytes.length <= B64_CHUNK) {
+      return global.btoa(String.fromCharCode.apply(null, bytes));
+    }
     var out = [];
     for (var i = 0; i < bytes.length; i += B64_CHUNK) {
       out.push(
-        global.btoa(
-          String.fromCharCode.apply(
-            null,
-            bytes.subarray(i, Math.min(i + B64_CHUNK, bytes.length))
-          )
-        )
+        global.btoa(String.fromCharCode.apply(null, bytes.subarray(i, i + B64_CHUNK)))
       );
     }
     return out.join('');
@@ -190,7 +193,6 @@
     biquadLowpass: parts.biquadLowpass,
     resampler: parts.resampler,
     ring: parts.ring,
-    int16ToFloat32: int16ToFloat32,
     toBase64: toBase64,
     workletParts: workletParts,
     WORKLET_PARTS: [parts.biquadLowpass, parts.resampler, parts.ring]
