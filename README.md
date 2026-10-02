@@ -30,7 +30,7 @@ HTML + CSS + JavaScript murni — **tanpa build step, tanpa server, tanpa backen
 | **Multi-bahasa** | Deteksi bahasa otomatis, atau dikunci ke satu bahasa; assistant ikut berganti |
 | **Visualizer audio** | Orb dan equalizer bergerak mengikuti spektrum suara sungguhan |
 | **Sambung ulang otomatis** | Koneksi diputus server (rotasi/putus jaringan) → disambung ulang dengan *session resumption*, transkrip dan konteks tetap utuh |
-| **Batas durasi** | Maksimal 15 menit *per koneksi* (batas server), lalu rotasi otomatis ke koneksi baru tanpa mengakhiri percakapan |
+| **Sesi tanpa batas** | *Context window compression* (sliding window) menembus batas keras 15 menit; koneksi tetap dirotasi otomatis tiap ±10 menit tanpa memutus percakapan |
 | **Kunci API** | Disimpan di `localStorage` browser, tidak pernah masuk repository |
 
 ---
@@ -208,26 +208,30 @@ natural, bukan seperti membaca dokumen.
 
 ## Batasan & catatan penting
 
-- **Durasi maksimal 15 menit per koneksi.** Ini batas server untuk satu
-  WebSocket di Live API. Ketika mendekati batas, server mengirim `goAway` dan
-  aplikasi otomatis **membuka koneksi baru sambil membawa handle session
-  resumption**, jadi percakapan berlanjut tanpa konteks yang hilang dan tanpa
-  perlu menekan mikrofon lagi. Timer di layar menghitung total durasi bicara,
-  bukan umur satu koneksi.
-- **Koneksi juga dirotasi otomatis bila diputus.** Server Live API secara
-  berkala mereset WebSocket (rotasi internal, batas jaringan, kuota). Aplikasi
-  mendeteksi penutupan yang tidak diminta lalu menyambung ulang dengan backoff
-  bertingkat, memakai `sessionResumption` agar konteks percakapan tetap
-  tersimpan. `sessionResumption` **tidak** membutuhkan jalur koneksi khusus —
-  cukup field itu dikirim di pesan `setup`, dan handle barunya diambil dari
-  `sessionResumptionUpdate` yang dikirim server. Handle berlaku 2 jam; kalau
-  kedaluwarsa, aplikasi memulai konteks baru dengan bersih.
-- **Sesi benar-benar berakhir hanya bila kamu menekan tombol mikrofon.** Kalau
-  sambung ulang gagal berkali-kali, aplikasi berhenti mencoba (agar tidak
-  membuang kuota) dan meminta kamu menekan mikrofon untuk memulai sesi baru.
-- **Biaya mengikuti kuota API key kamu.** Live API ditagih per token audio, dan
-  sesi 15 menit bisa memakan kuota yang sizeable. Pasang kuota harian di Google
-  Cloud Console kalau tidak ingin kejutan biaya.
+- **Sesi tidak dibatasi 15 menit lagi.** Tanpa konfigurasi tambahan, Live API
+  membatasi sesi audio-only **keras 15 menit** karena token konteks penuh — dan
+  session resumption **tidak bisa** menembus batas ini. Itu sebabnya dulu
+  koneksi tampak "gagal reconnect di menit ke-15". Aplikasi kini mengaktifkan
+  `contextWindowCompression` dengan `slidingWindow`, sehingga server otomatis
+  membuang bagian paling awal konteks dan sesi bisa berjalan tanpa batas waktu
+  (system instruction tetap dipertahankan).
+- **Koneksi dirotasi otomatis.** Umur satu WebSocket di Live API terbatas
+  sekitar 10 menit. Server mengirim `goAway` sebelum menutupnya; aplikasi lalu
+  membuka koneksi baru sambil membawa handle session resumption, jadi
+  percakapan berlanjut dengan konteks utuh dan tanpa menekan mikrofon lagi.
+  Timer di layar menghitung total durasi bicara, bukan umur satu koneksi.
+- **Putus jaringan pun disambung ulang.** Penutupan yang tidak diminta
+  dideteksi lalu dicoba ulang dengan backoff bertingkat memakai
+  `sessionResumption`. Handle berlaku 2 jam setelah sesi berakhir. Kalau server
+  menolak resume (handle kedaluwarsa / sesi benar-benar tamat), aplikasi
+  **otomatis memulai sesi baru** — mikrofon tetap aktif, hanya konteks lama yang
+  hilang — bukan meminta kamu klik ulang.
+- **Sesi benar-benar berakhir hanya bila kamu menekan tombol mikrofon** (atau
+  gagal berulang karena API key/kuota).
+- **Biaya mengikuti kuota API key kamu.** Live API ditagih per token audio
+  (sekitar 25 token per detik bicara). Karena sesi kini bisa panjang, biaya juga
+  ikut bertambah — pasang kuota harian di Google Cloud Console kalau tidak ingin
+  kejutan biaya.
 - **`file://` punya beberapa batasan browser.** Chrome dan Edge biasanya bekerja
   penuh. Safari memblokir mikrofon pada `file://` (harus lewat `http://localhost`
   atau hosting), dan sebagian browser tidak menyediakan `localStorage` untuk
@@ -254,8 +258,9 @@ natural, bukan seperti membaca dokumen.
 | "Model … tidak tersedia" (404) | Id model tidak cocok dengan key. Gunakan `gemini-3.1-flash-live-preview` atau id terbaru. |
 | Assistant terputus sendiri saat dia bicara | Feedback speaker ke mikrofon. Pakai headphone, atau nyalakan “Matikan mikrofon saat assistant bicara”. |
 | "Koneksi ditolak" | Jalankan lewat `localhost`/hosting agar `Origin` valid, atau cek firewall. |
-| Percakapan sempat terasa putus lalu lanjut lagi tiap ±10–15 menit | Normal: server Live API merotasi WebSocket. Aplikasi menyambung ulang otomatis dengan session resumption — muncul notifikasi "sesi dilanjutkan", transkrip & konteks tetap utuh. |
-| "Koneksi Live API terputus dan tidak berhasil disambung ulang" | Beberapa percobaan sambung ulang gagal (jaringan/kuota). Tekan mikrofon untuk memulai sesi baru. |
+| Percakapan sempat terasa putus lalu lanjut lagi tiap ±10 menit | Normal: server merotasi WebSocket. Aplikasi menyambung ulang otomatis dengan session resumption — muncul notifikasi "sesi dilanjutkan", transkrip & konteks tetap utuh. |
+| Notifikasi "memulai konteks percakapan baru" | Server menolak resume (sesi sudah tamat/kedaluwarsa). Aplikasi otomatis memulai sesi baru; mikrofon tetap aktif, hanya konteks lama yang hilang. |
+| "Koneksi Live API terputus dan tidak berhasil disambung ulang" | Percobaan sambung ulang habis (jaringan/kuota/API key). Tekan mikrofon untuk memulai sesi baru. |
 | Assistant terpotong sendiri saat kamu bicara | Jeda bisikan terlalu pendek. Turunkan “Kecepatan respons” ke **Normal**. |
 | Badge "ScriptProcessor (cadangan)" | `addModule` gagal di browser itu. Tetap berfungsi; AudioWorklet hanya lebih halus. |
 

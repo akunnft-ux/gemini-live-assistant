@@ -196,12 +196,31 @@
         wasReady: wasReady,
         intentional: intentional,
         timedOut: timedOut,
-        goAway: self.sawGoAway
+        goAway: self.sawGoAway,
+        /* true bila socket ini dibuka dengan handle resumption. Dipakai
+         * orkestrator: resume yang ditolak harus jatuh ke sesi BARU, bukan
+         * dianggap error permanen lalu minta user klik ulang. */
+        resumeAttempt: self._resumed === true
       };
 
       self._emit('state', self.state);
       if (self.state === STATE.FAILED) {
-        var err = describeClose(ev, wasReady, self.settings, timedOut, self.sawGoAway);
+        var err;
+        if (self._resumed && !wasReady) {
+          /* Handle resumption ditolak (kedaluwarsa, atau sesi lama sudah
+           * tamat karena token penuh). Ini BUKAN kesalahan key/konfigurasi —
+           * jangan tandai permanen; orkestrator akan menyambung sebagai sesi
+           * baru. Pesan khusus supaya tidak tampil "koneksi ditolak" yang
+           * menyesatkan. */
+          err = fail(
+            'Sesi sebelumnya tidak bisa dilanjutkan' +
+              (reason ? ' (' + reason + ')' : '') +
+              '. Memulai konteks baru…',
+            true
+          );
+        } else {
+          err = describeClose(ev, wasReady, self.settings, timedOut, self.sawGoAway);
+        }
         /* retryable = layak disambung ulang. Dipakai app.js supaya sesi yang
          * kehabisan handle / gagal connect tidak ikut mencoba terus-menerus. */
         self.lastClose.retryable = err.retryable === true;
@@ -287,6 +306,13 @@
       realtimeInputConfig: vad,
       inputAudioTranscription: {},
       outputAudioTranscription: {},
+
+      /* WAJIB untuk sesi panjang. Tanpa ini server membatasi sesi audio-only
+       * keras 15 menit (token konteks penuh), dan resumption tidak bisa
+       * menolong — reconnect di menit ke-15 akan ditolak. slidingWindow
+       * membuat server membuang konteks paling awal otomatis sehingga sesi
+       * bisa jalan tanpa batas. Dikirim di SETIAP setup, termasuk resume. */
+      contextWindowCompression: GLA.SESSION.contextWindowCompression,
 
       /* WAJIB ada, bahkan pada sambungan pertama. Field ini yang menyuruh
        * server mengirim `sessionResumptionUpdate{newHandle,resumable}` secara

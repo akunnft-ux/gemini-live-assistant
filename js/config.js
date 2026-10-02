@@ -31,15 +31,33 @@
     output: {
       sourceRate: 24000
     },
-    // 15 menit = batas hard session audio-only di Live API
+    /* Batas durasi satu KONEKSI (~10 menit menurut dokumen Live API). Bukan
+     * batas sesi: sesi bisa lebih panjang dari ini karena context window
+     * compression + session resumption. Angka 15 menit di sini hanya jaring
+     * pengaman kalau `goAway` tidak sampai. */
     sessionLimitMs: 15 * 60 * 1000,
     warnBeforeMs: 60 * 1000
   };
 
+  /* -------------------------------------------------------------- SESSION -- */
+  /* TANPA context window compression, sesi audio-only DIBATASI KERAS 15
+   * menit oleh server — bukan karena koneksi, tapi karena token konteks
+   * penuh. Ini penting: session resumption TIDAK BISA menembus batas ini.
+   * Begitu token habis, sesinya tamat dan reconnect memakai handle sekalipun
+   * akan ditolak server → user harus memulai ulang manual. Itulah kenapa
+   * koneksi "gagal reconnect setelah 15 menit".
+   *
+   * Dengan `slidingWindow`, server otomatis membuang bagian paling awal
+   * konteks ketika sudah terlalu panjang, sehingga sesi bisa berjalan tanpa
+   * batas waktu. Sistem instruction selalu dipertahankan. */
+  var SESSION = {
+    contextWindowCompression: { slidingWindow: {} }
+  };
+
   /* ------------------------------------------------------------ RECONNECT -- */
-  /* Server Live APIMEMATIKAN WebSocket secara berkala (batas durasi per
-   * koneksi, rotation, atau drop jaringan). Koneksi yang putus TIDAK berarti
-   * sesi berakhir: dengan `sessionResumption` di setup, sambungan baru bisa
+  /* Server Live API memutus WebSocket secara berkala (batas umur koneksi ~10
+   * menit, rotasi, atau drop jaringan). Koneksi yang putus TIDAK berarti sesi
+   * berakhir: dengan `sessionResumption` di setup, sambungan baru bisa
    * melanjutkan konteks percakapan yang sama lewat handle. Jadi ini pengaman
    * koneksi, bukan fitur tambahan — tanpa ini user kehilangan sesi secara
    * acak, kadang jauh sebelum 15 menit. */
@@ -290,6 +308,7 @@
 
   GLA.API = API;
   GLA.AUDIO = AUDIO;
+  GLA.SESSION = SESSION;
   GLA.RECONNECT = RECONNECT;
   GLA.VAD = VAD;
   GLA.MODELS = MODELS;

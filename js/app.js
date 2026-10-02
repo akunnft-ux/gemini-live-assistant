@@ -94,6 +94,10 @@
     connStartedAt = Date.now();
     if (fresh) startedAt = connStartedAt;
     warnedLimit = false;
+    /* Sambungan berhasil → anggaran sambung ulang penuh lagi. Tanpa reset ini
+     * sesi panjang yang berkali-kali putus akan kehabisan jatah lalu mati
+     * walaupun tiap kali berhasil nyambung. */
+    reconnectAttempt = 0;
     clearReconnect();
 
     UI.setStatus('live', 'Live');
@@ -198,6 +202,12 @@
 
     if (!wantSession || session === 'stopping' || session === 'idle') return;
 
+    /* Resume ditolak (handle kedaluwarsa / sesi lama sudah tamat karena token
+     * penuh): jangan dianggap error permanen — lanjutkan sebagai sesi BARU
+     * tanpa memaksa user klik mikrofon lagi. Konteks lama memang hilang, tapi
+     * mikrofon tetap hidup. */
+    var resumeFailed = !wasReady && info.resumeAttempt === true && info.retryable === true;
+
     /* Sambung ulang hanya untuk kegagalan sesaat. Key salah / kuota habis /
      * setup ditolak sudah ditandai retryable=false oleh live-client — mencoba
      * lagi hanya membuang kuota. Untuk kasus itu kembalikan UI ke idle agar
@@ -214,9 +224,11 @@
       return;
     }
 
-    /* Kalau sesi belum pernah benar-benar hidup (connect gagal), coba sedikit
-     * saja supaya user tidak menunggu lama pada koneksi yang memang salah. */
-    var budget = wasReady ? GLA.RECONNECT.backoffMs.length : 2;
+    /* Anggaran percobaan. Sesi yang sudah pernah hidup (atau yang sedang
+     * mencoba resume) dapat anggaran penuh; connect pertama yang gagal — belum
+     * pernah ready & bukan resume — hanya dicoba sedikit supaya tidak menunggu
+     * lama pada konfigurasi/key yang memang salah. */
+    var budget = wasReady || info.resumeAttempt ? GLA.RECONNECT.backoffMs.length : 2;
     if (reconnectAttempt >= budget) {
       wantSession = false;
       session = 'idle';
@@ -229,12 +241,12 @@
       return;
     }
 
-    scheduleReconnect();
+    scheduleReconnect(undefined, undefined, resumeFailed);
   }
 
   /* ------------------------------------------------- sambung ulang (reconnect) */
 
-  function scheduleReconnect(delayMs, reason) {
+  function scheduleReconnect(delayMs, reason, fresh) {
     if (!wantSession || session === 'stopping') return;
     clearReconnect();
 
@@ -249,6 +261,14 @@
     commitAi();
     audio.clearOutput();
 
+    if (fresh) {
+      UI.toast(
+        'Sesi lama tidak bisa dilanjutkan — memulai konteks percakapan baru, mikrofon tetap aktif.',
+        'warn',
+        8000
+      );
+    }
+
     UI.setStatus('busy', 'Menyambung ulang');
     UI.setMicMode('reconnecting');
     UI.setStateLabel(
@@ -260,8 +280,9 @@
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       if (!wantSession) return;
-      /* handle resumption (kalau ada) ikut di setup → konteks diteruskan. */
-      client.connect(settings);
+      /* handle resumption (kalau ada) ikut di setup → konteks diteruskan.
+       * `fresh` membuang handle: dipakai saat resume ditolak server. */
+      client.connect(settings, fresh ? { fresh: true } : undefined);
     }, delay);
   }
 
