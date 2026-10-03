@@ -491,6 +491,45 @@ code {
   }
 }
 
+/* Keadaan reconnecting (app.js:273) reachable tapi tadinya tanpa rule sama
+ * sekali, sehingga tombol tampil persis seperti .mic--idle: pil netral yang
+ * tidak bergerak. Dua state dengan arti berlawanan ("belum mulai" vs
+ * "menyambung ulang") jadi tidak bisa dibedakan — padahal status pill dan teks
+ * label sudah berubah.
+ *
+ * Amber, bukan merah: merah dipakai .mic--live (sedang merekam), dan warna
+ * base-nya ungu (= diam). Jadi tiga kondisi utama punya warna berbeda: ungu
+ * diam, merah merekam, amber mencoba sambung.
+ *
+ * Ikon sengaja TIDAK diputar seperti .mic--loading / .mic--ending: spinner
+ * berarti "sedang bekerja menuju sesuatu", sedangkan reconnect adalah
+ * percobaan ulang yang boleh gagal berkali-kali lalu diulang — halo berdenyut
+ * lebih jujur, dan bonusnya tidak tertukar dengan kedua state itu.
+ *
+ * Tombol sengaja tetap enabled (reconnecting tidak masuk daftar disabled di
+ * setMicMode) supaya user bisa menekan untuk membatalkan. Karena itu jangan
+ * tambahkan cursor: progress di sini — itu milik :disabled. */
+.mic--reconnecting {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: linear-gradient(140deg, rgba(251, 191, 36, 0.16), rgba(255, 255, 255, 0.04));
+  box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.42), 0 12px 38px -14px rgba(251, 191, 36, 0.7);
+  animation: micRetry 1.9s ease-in-out infinite;
+}
+
+.mic--reconnecting .mic__icon {
+  background: linear-gradient(150deg, #fbbf24, #d97706);
+}
+
+@keyframes micRetry {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.42), 0 12px 38px -14px rgba(251, 191, 36, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 0 11px rgba(251, 191, 36, 0), 0 12px 38px -14px rgba(251, 191, 36, 0.7);
+  }
+}
+
 /* ----------------------------------------------------------------- panel */
 
 .panel {

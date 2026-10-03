@@ -133,8 +133,28 @@ di README. Ringkasnya:
   pernah hilang sendiri.
 - **`readRaw()` harus membaca `memoryStore` lebih dulu.** `memoryStore` hanya
   diisi saat `localStorage` gagal menulis (kuota penuh). Kalau ia hanya
-  dipakai sebagai cadangan saat `storageOK === false`, fallback-nya sia-sia: data ditulis ke
-  tempat yang tidak pernah dibaca lagi.
+  dipakai sebagai cadangan saat `storageOK === false`, fallback-nya sia-sia:
+  data ditulis ke tempat yang tidak pernah dibaca lagi.
+
+### Kelas CSS yang sengaja tidak punya rule
+
+Audit "kelas ada di HTML tapi tidak ada di CSS" akan menghasilkan beberapa
+hit. Tidak semuanya bug:
+
+| Kelas | Kenapa tidak perlu rule |
+| --- | --- |
+| `.orb__ring--1` | Ring 1 memakai rule base `.orb__ring`. `--2` dan `--3` cuma modifier yang meng-override yang memang beda (inset, warna, delay) — pola BEM, base membawa gaya dasar dan modifier hanya menimpa. `--1` sengaja ada di HTML supaya lapisan 1/2/3 terbaca. |
+| `.stage__actions` | Hook struktural untuk baris tombol. `.stage` sudah `flex-direction: column`, jadi wrapper-nya tidak merusak layout dan tidak butuh rule. |
+| `.mic__label` | Hook JS (`ui.js` me-query `.mic__label` untuk mengganti teks) dan sudah mewarisi tipografi dari `.mic`. |
+| `.mic--idle` | Idle memang sama persis dengan base `.mic`. Rule khusus untuknya cuma CSS mati. |
+
+Yang **wajib** punya styling adalah setiap mode yang bisa di-set `setMicMode()`:
+`idle`, `loading`, `live`, `ending`, `reconnecting`. Mode yang belum punya
+styling akan tampil sama persis dengan mode lain — itu bukan sekadar
+inkonsistensi, tapi pengguna jadi tidak bisa membedakan dua keadaan yang
+artinya berlawanan. Kalau menambah mode baru, tambahkan styling-nya di blok
+yang sama. `setMicMode` mengganti `className` penuh, jadi tidak pernah ada dua
+state aktif sekaligus.
 
 ## 9. Workflow agent
 
@@ -157,6 +177,38 @@ harness di `/tmp/opencode/gla-test/` (semua berbasis `assert`, tanpa browser):
 | `ui.js` | `ui.js`: stub DOM, round-trip `fillSettings()`/`readSettings()` |
 
 Jalankan semuanya: `cd /tmp/opencode/gla-test && for t in t wire ui; do node $t.js; done`
+
+Cakupan styling tombol mikrofon bisa dicek tanpa browser. Komentar harus
+dibuang dulu — kalau tidak, penyebutan class di dalam komentar ikut terhitung
+dan check-nya jadi berbohong:
+
+```bash
+python3 - <<'EOF'
+import io, re
+css = re.sub(r'/\*.*?\*/', '', io.open('css/style.css').read(), flags=re.S)
+# Tier per mode: 'own'   = wajib punya rule sendiri (warna/halo berbeda)
+#              'child' = cukup rule untuk .mic__icon saja (ikon berputar)
+#              'none'  = memang tidak boleh ada styling, identik dengan base
+EXPECT = {'idle': 'none', 'loading': 'child', 'ending': 'child',
+          'live': 'own', 'reconnecting': 'own'}
+RANK = {'none': 0, 'child': 1, 'own': 2}
+bad = 0
+for mode, want in sorted(EXPECT.items()):
+    own = bool(re.search(r'\.mic--%s\s*(?:,|\{|$)' % mode, css, re.M))
+    child = bool(re.search(r'\.mic--%s\s+\.' % mode, css, re.M))
+    got = 'own' if own else 'child' if child else 'none'
+    ok = RANK[got] >= RANK[want]
+    bad += not ok
+    print('  %-14s butuh %-6s ada %-6s %s' % (mode, want, got, 'ok' if ok else '<<< PERIKSA'))
+raise SystemExit(bad)
+EOF
+```
+
+Tier dipakai karena check yang hanya "ada / tidak ada" punya lubat: menghapus
+rule `.mic--live` saja masih terbaca "lengkap" selama `.mic--live
+.mic__icon` masih ada. Kalau `reconnecting` turun ke `child` atau `none`,
+tombolnya kembali tampak sama dengan `idle` — persis bug yang sudah pernah
+terjadi sekali.
 
 `ui.js` paling berguna sebagai guard regression — dia membandingkan **setiap** key
 `DEFAULT_SETTINGS` terhadap hasil `readSettings()`, jadi field yang lupa
@@ -183,7 +235,7 @@ terverifikasi secara statis, jangan klaim sudah dites manual.
 
 - **IndexedDB untuk memori.** Ditolak: `file://` di Chrome memberi opaque
   origin, `localStorage` juga bisa gagal tapi punya fallback in-memory yang
- cukup untuk kasus degenerate.
+  cukup untuk kasus degenerate.
 - **Ringkasan memori pakai LLM.** Butuh panggilan API tambahan, menambah
   latensi, surface area failure, dan hasil kosong kalau quota habis. Verbatim
   + batas karakter sudah menutup sekitar 95% kebutuhan tanpa biaya.
