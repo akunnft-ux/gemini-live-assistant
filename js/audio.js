@@ -1,5 +1,5 @@
 /* =============================================================================
- * audio.js — Mesin audio:}tangkap mic → PCM16 16 kHz, playback PCM16 24 kHz
+ * audio.js — Mesin audio: tangkap mic → PCM16 16 kHz, playback PCM16 24 kHz
  * -----------------------------------------------------------------------------
  * Satu AudioContext dipakai untuk dua arah (in/out) supaya lebih ringan.
  * Enkripsi: 16 kHz mono 16-bit little-endian (masuk), 24 kHz mono (keluar).

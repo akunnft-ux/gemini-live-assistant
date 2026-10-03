@@ -831,6 +831,15 @@ code {
   min-height: 62px;
 }
 
+/* .field label memberi font-weight:600, dan checkbox mute (.check +
+   * .field--wide pada elemen yang sama) TIDAK kena .field label karena bukan
+   * turunannya. Akibatnya teks checkbox Memori jadi lebih tebal dari checkbox
+   * mute di bawahnya. .field.memory .check (0,2,0) menang atas .field label
+   * (0,1,1), jadi override dilakukan di sini. */
+.field.memory .check {
+  font-weight: 400;
+}
+
 .field.memory .hint {
   margin: 0;
 }

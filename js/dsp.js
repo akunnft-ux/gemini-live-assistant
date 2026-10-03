@@ -2,7 +2,7 @@
  * dsp.js — Utilitas sinyal, dipakai oleh halaman UTAMA dan oleh AudioWorklet
  * -----------------------------------------------------------------------------
  * Fungsi di workletParts() di-stringify lalu dievaluasi ulang di dalam thread
- * AudioWorklet. ConstRAINT penting:
+ * AudioWorklet. Constraint penting:
  *   1. bentuknya factory function + object literal (BUKAN class dengan
  *      prototype.* di luar) — ClassName.toString() tidak menyertakan method
  *      prototype, sedangkan source object literal menyertakannya;

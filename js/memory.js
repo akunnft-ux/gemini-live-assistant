@@ -31,6 +31,8 @@
    * jatuh ke memory store — sama seperti storage.js — supaya aplikasi tetap
    * jalan, hanya memorinya yang tidak bertahan setelah reload. */
   var memoryStore = {};
+
+  /* localStorage "terlihat" dipakai: probe setItem berhasil. */
   var storageOK = (function () {
     try {
       var probe = '__gla_mem_probe__';
@@ -42,22 +44,44 @@
     }
   })();
 
+  /* Terpakai setelah storageOK=true tapi penulisan tetap gagal (mis. kuota
+   * localStorage penuh). Setelah itu memori hanya hidup sebatas tab ini, jadi
+   * UI harus diberi tahu — kalau tidak, hint tetap menjanjikan "Tersimpan di
+   * browser ini" padahal tidak. */
+  var storageDegraded = false;
+
   function readRaw(key) {
+    /* memoryStore hanya diisi oleh writeRaw KETIKA localStorage menulis gagal,
+     * jadi kalau ia punya key itu berarti isinya lebih baru daripada yang ada
+     * di localStorage. Harus dicek DULUAN — kalau hanya dipakai sebagai
+     * cadangan saat storageOK===false, fallback itu jadi sia-sia: data ditulis
+     * ke tempat yang tidak pernah dibaca lagi dan hilang diam-diam. */
+    try {
+      if (Object.prototype.hasOwnProperty.call(memoryStore, key)) return memoryStore[key];
+    } catch (e) {
+      /* abaikan, lanjut ke localStorage */
+    }
     try {
       if (storageOK) return global.localStorage.getItem(key);
-      return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null;
     } catch (e) {
       return null;
     }
+    return null;
   }
 
   function writeRaw(key, value) {
+    if (!storageOK) {
+      memoryStore[key] = value;
+      return true;
+    }
     try {
-      if (storageOK) global.localStorage.setItem(key, value);
-      else memoryStore[key] = value;
+      global.localStorage.setItem(key, value);
+      /* Tulis berhasil → memoryStore tidak boleh bayanganin nilai basi. */
+      delete memoryStore[key];
       return true;
     } catch (e) {
       memoryStore[key] = value;
+      storageDegraded = true;
       return false;
     }
   }
@@ -97,7 +121,10 @@
       'override\\s+(your|all)\\s+(rules?|instructions?)',
       '(reveal|print|repeat|show)\\s+(me\\s+)?(your|the)\\s+(system\\s+)?(prompt|instructions?)'
     ].join('|'),
-    'i'
+    /* 'g' itu wajib: pola ini sengaja dibuat alternatif (satu giliran bisa
+     * memuat beberapa percobaan injeksi), dan String.replace tanpa 'g' hanya
+     * menukar yang pertama. Sisanya akan lolos apa adanya. */
+    'gi'
   );
 
   /* Ganti frasa berbahaya dengan placeholder netral, bukan hapus — supaya
@@ -159,10 +186,22 @@
   /* ------------------------------------------------------------------ API - */
 
   var Memory = {
-    /* localStorage tidak bisa dipakai → memori hanya bertahan selama tab
-     * terbuka. UI menampilkan catatan ini ke user. */
-    isPersistent: storageOK,
+    /* localStorage tidak bisa dipakai, ATAU penulisan ke sana gagal terus
+     * (mis. kuota penuh) → memori hanya bertahan selama tab terbuka. UI
+     * menampilkan catatan ini ke user. */
+    isPersistent: storageOK && !storageDegraded,
 
+    /* BACA HARUS DISANITASI, bukan cuma tulis.
+     *
+     * addTurn() sanitize sebelum menyimpan, tapi itu tidak cukup: sanitize
+     * pada waktu tulis hanya membersihkan nilai yang masuk lewat API. Payload
+     * yang sudah ada di localStorage — ditulis versi app lain, diedit manual,
+     * atau berasal dari mesin lain — akan dibaca apa adanya oleh load() lalu
+     * diteruskan ke system instruction. Yang lebih buruk: addTurn() memanggil
+     * load() lalu save(), jadi payload yang tidak disanitasi itu ikut tersalin
+     * ulang setiap giliran dan tidak pernah hilang dengan sendirinya.
+     *
+     * Idempoten, jadi sanitize di sini tidak merusak data yang sudah bersih. */
     load: function () {
       var raw = readRaw(KEY);
       if (!raw) return [];
@@ -177,9 +216,11 @@
       for (var i = 0; i < parsed.length; i++) {
         var t = parsed[i];
         if (!t || typeof t.text !== 'string' || !t.text.trim()) continue;
+        var text = sanitize(t.text.trim());
+        if (text.length < MIN_TURN_CHARS) continue;
         out.push({
           role: normalizeRole(t.role),
-          text: t.text.trim(),
+          text: text,
           ts: typeof t.ts === 'number' ? t.ts : 0
         });
       }
@@ -190,22 +231,26 @@
       return writeRaw(KEY, JSON.stringify(trim(turns || [])));
     },
 
-    /* Panggil sekali tiap giliran selesai (dari app.js). */
+    /* Panggil sekali tiap giliran SELESAI (dari app.js).
+     *
+     * Catatan penting soal ini fungsi: TIDAK ada lagi logika penggabung
+     * "prefix" di sini. Dulu ada, dengan asumsi transkrip live datang
+     * terpecah jadi banyak potongan untuk satu kalimat. Tapi app.js sudah
+     * mengumpulkan potongan-potongan itu sendiri (aiBuf += text) dan memanggil
+     * fungsi ini tepat SEKALI per giliran lengkap — makanya tiap panggilan
+     * sudah berisi satu giliran utuh, bukan fragmen.
+     *
+     * Asumsi yang salah itu justru jadi merusak: dua giliran assistant yang
+     * sama-sama diawali kata yang sama (mis. "Oke" lalu "Oke, berarti kamu
+     * mau…") ternyata dianggap continuation, sehingga giliran pertama DITIMPA
+     * dan hilang permanen dari memori. Karena kedua-duanya satu giliran utuh,
+     * menggabungkan tidak pernah benar — jadi dihapus, bukan disempitkan. */
     addTurn: function (role, text) {
       var clean = sanitize(String(text || '').trim());
       if (clean.length < MIN_TURN_CHARS) return false;
 
       var turns = Memory.load();
-/* Kurangi duplikasi: transkrip live sering terkirim terpecah (banyak
-       * potongan untuk satu kalimat). Kalau turn terakhir ber.role sama dan
-       * teks baru dimulai dari teks sebelumnya, gabungkan — bukan simpan
-       * dua kali. Ini yang membuat 12 turn benar-benar berarti 12 giliran. */
-      var last = turns[turns.length - 1];
-      if (last && last.role === normalizeRole(role) && clean.indexOf(last.text) === 0) {
-        turns[turns.length - 1] = { role: last.role, text: clean, ts: Date.now() };
-      } else {
-        turns.push({ role: normalizeRole(role), text: clean, ts: Date.now() });
-      }
+      turns.push({ role: normalizeRole(role), text: clean, ts: Date.now() });
       Memory.save(turns);
       return true;
     },
@@ -218,7 +263,7 @@
       var turns = Memory.load();
       var chars = 0;
       for (var i = 0; i < turns.length; i++) chars += turns[i].text.length;
-      return { count: turns.length, chars: chars, persistent: storageOK };
+      return { count: turns.length, chars: chars, persistent: storageOK && !storageDegraded };
     },
 
     /* ------------------------------------------------------------ prompt - */

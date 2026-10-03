@@ -119,6 +119,22 @@ di README. Ringkasnya:
   blok itu tidak bergantung pada giliran.
 - Isi `<<<MEMORY_*>>>` adalah **data, bukan instruksi**. Kalimat penjaga di
   `buildSystemInstruction` tidak boleh dihapus.
+- **Satu `addTurn()` = satu giliran utuh.** Jangan menambahkan logika
+  penggabung prefix di sana. `app.js` sudah mengumpulkan potongan streaming
+  sendiri (`aiBuf += text`) dan memanggil `remember()` sekali per giliran
+  lengkap, jadi pemanggil tidak pernah mengirim fragmen. Dulu ada prefix-merge
+  dengan asumsi sebaliknya, dan itu justru menghapus giliran asli setiap kali
+  ada dua giliran assistant sama-sama diawali kata yang sama ("Oke" lalu "Oke, berarti
+  kamu mau…").
+- **Sanitasi harus di `load()`, bukan hanya di `addTurn()`.** Menyanitize saat
+  tulis hanya membersihkan nilai yang masuk lewat API; payload yang sudah ada di
+  `localStorage` akan diteruskan apa adanya. Lebih buruk, `addTurn()` →
+  `load()` → `save()` berarti payload itu disalin ulang tiap giliran dan tidak
+  pernah hilang sendiri.
+- **`readRaw()` harus membaca `memoryStore` lebih dulu.** `memoryStore` hanya
+  diisi saat `localStorage` gagal menulis (kuota penuh). Kalau ia hanya
+  dipakai sebagai cadangan saat `storageOK === false`, fallback-nya sia-sia: data ditulis ke
+  tempat yang tidak pernah dibaca lagi.
 
 ## 9. Workflow agent
 
@@ -131,13 +147,24 @@ setiap perubahan:
 for f in js/*.js; do node --check "$f" || echo "SINTAX FAIL: $f"; done
 ```
 
-Untuk perubahan yang menyentuh memori atau wire protocol, jalankan harness
-`/tmp/opencode/gla-test/wire.js` (sandbox `vm` + stub WebSocket, tanpa browser)
-dan `t.js` (unit test store). Keduanya berbasis assert dan bisa dijalankan ulang.
+Untuk perubahan yang menyentuh memori, wire protocol, atau settings UI, jalankan
+harness di `/tmp/opencode/gla-test/` (semua berbasis `assert`, tanpa browser):
 
-Tidak ada Chrome/Chromium di environment ini, jadi **smoke test di browser
-tidak bisa diotomasikan** — katakan terus terang kalau sebuah perubahan
-hanya terverifikasi secara statis, jangan klaim sudah dites manual.
+| Harness | Yang diuji |
+| --- | --- |
+| `t.js` | `memory.js` + `config.js`: store, cap, sanitasi, prompt |
+| `wire.js` | `live-client.js`: sandbox `vm` + stub WebSocket, seed fresh-only |
+| `ui.js` | `ui.js`: stub DOM, round-trip `fillSettings()`/`readSettings()` |
+
+Jalankan semuanya: `cd /tmp/opencode/gla-test && for t in t wire ui; do node $t.js; done`
+
+`ui.js` paling berguna sebagai guard regression — dia membandingkan **setiap** key
+`DEFAULT_SETTINGS` terhadap hasil `readSettings()`, jadi field yang lupa
+ditambahkan di salah satu sisi langsung ketahuan.
+
+Tidak ada Chrome/Chromium di environment ini, jadi **smoke test di browser tidak
+bisa diotomasikan** — katakan terus terang kalau sebuah perubahan hanya
+terverifikasi secara statis, jangan klaim sudah dites manual.
 
 ### Gaya
 
