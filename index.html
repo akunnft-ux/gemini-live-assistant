@@ -229,6 +229,29 @@
             <p class="hint" id="searchHint" hidden></p>
           </div>
 
+          <div class="field field--wide memory">
+            <label class="check">
+              <input type="checkbox" id="fMemory" checked />
+              <span>
+                <strong>Ingat percakapan sebelumnya</strong>
+                <em
+                  >Giliran terakhir yang kamu ngobrol ikut dibawa ke sesi berikutnya,
+                  jadi assistant tidak mulai dari nol tiap kali kamu membuka
+                  halaman ini.</em
+                >
+              </span>
+            </label>
+            <label class="sublabel" for="fMemoryNotes">Catatan yang selalu diingat</label>
+            <textarea
+              id="fMemoryNotes"
+              rows="3"
+              maxlength="1200"
+              spellcheck="false"
+              placeholder="Contoh: Nama saya Budi, saya kerja di Jakarta. Balasan jangan terlalu panjang."
+            ></textarea>
+            <p class="hint" id="memoryHint"></p>
+          </div>
+
           <label class="check field--wide">
             <input type="checkbox" id="fMuteWhileSpeaking" />
             <span>
@@ -252,6 +275,9 @@
             <button class="ghostbtn ghostbtn--danger" id="settingsForget" type="button">
               Hapus API key
             </button>
+            <button class="ghostbtn ghostbtn--danger" id="memoryForget" type="button">
+              Hapus memori
+            </button>
             <span class="spacer"></span>
             <button class="ghostbtn" id="settingsCancel" type="button">Batal</button>
             <button class="btn" id="settingsSave" type="button">Simpan</button>
@@ -268,9 +294,12 @@
       </p>
     </noscript>
 
-    <!-- Classic script (bukan ES module) supaya file:// tetap bisa dipakai. -->
+    <!-- Classic script (bukan ES module) supaya file:// tetap bisa dipakai.
+         Urutan itu penting: config.js menyediakan GLA.MEMORY yang dipakai
+         memory.js, dan ui.js memakai GLA.Memory + GLA.Util. -->
     <script src="js/config.js"></script>
     <script src="js/storage.js"></script>
+    <script src="js/memory.js"></script>
     <script src="js/dsp.js"></script>
     <script src="js/worklet.js"></script>
     <script src="js/audio.js"></script>

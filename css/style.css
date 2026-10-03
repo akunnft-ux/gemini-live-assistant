@@ -816,6 +816,25 @@ code {
   grid-column: 1 / -1;
 }
 
+/* Blok memori: checkbox + catatan. Dipisah dari field biasa karena isinya
+   butuh lebar penuh dan punya jarak ekstra dari toggle mute di bawahnya. */
+.field.memory {
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.field.memory textarea {
+  resize: vertical;
+  min-height: 62px;
+}
+
+.field.memory .hint {
+  margin: 0;
+}
+
 .field {
   display: flex;
   flex-direction: column;

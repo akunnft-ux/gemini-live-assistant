@@ -8,6 +8,9 @@ Thumbs.db
 .env.*
 *.local
 
+# Catatan internal untuk coding agent (isi AGENTS.md yang di-commit)
+AGENTS.local.md
+
 # Logs
 *.log
 npm-debug.log*

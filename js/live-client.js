@@ -50,13 +50,26 @@
 
   /* opts.fresh : buang handle resumption → sesi benar-benar baru.
    *              Default (tanpa opts) = lanjutkan sesi pakai handle yang
-   *              tersimpan; itulah yang dipakai saat sambung ulang. */
+   *              tersimpan; itulah yang dipakai saat sambung ulang.
+   * opts.seedTurns : array turn untuk dikirim sebagai `clientContent` setelah
+   *              setup. HANYA kirim di sambungan fresh — di sambungan resume
+   *              server sudah memegang giliran itu, jadi mengirim ulang
+*              membuat konteks dobel.
+   * opts.recall   : baris rekaman memori untuk system instruction. Kirim []
+   *              di sambungan resume supaya blok RECALL tidak ikut mengulang
+   *              giliran yang server sudah punya. */
   LiveClient.prototype.connect = function (settings, opts) {
     var self = this;
     opts = opts || {};
 
     if (opts.fresh) this.resetResume();
     else this._pruneResume();
+
+    /* Seed diambil sekali di awal, bukan dibaca dari opts di dalam onopen,
+     * supaya jelas nilai yang dikirim sudah difreeze saat connect() dipanggil
+     * dan tidak ikut berubah di tengah. */
+    var seedTurns = opts.seedTurns && opts.seedTurns.length ? opts.seedTurns : null;
+    var recall = opts.recall || null;
 
     /* Pindah koneksi: naikkan nomor generasi DAN lepas socket lama SEBELUM
      * apa pun yang bisa memicu callback. Urutan ini penting — kalau socket
@@ -134,7 +147,21 @@
 
     ws.onopen = function () {
       if (self._gen !== gen) return;
-      self._send(setupMessage(settings, self.resumeHandle));
+      self._send(setupMessage(settings, self.resumeHandle, recall));
+
+      /* Riwayat verbatim sebagai clientContent. Best-effort: ada laporan
+       * (googleapis/python-genai#1733) bahwa turn yang dikirim lewat jalur ini
+       * diabaikan model pada beberapa versi Live API. Jadi ini PELENGKAP —
+       * konteks utama sudah dibawa lewat system instruction di setup di atas,
+       * yang cuma teks prompt dan tidak mungkin diabaikan. Tidak ada kerugian
+       * kalau server mengabaikannya.
+       *
+       * WAJIB `turnComplete: false`. Tanpa itu server langsung memulai
+       * generate dari giliran hasil seeding — assistant akan bicara sendiri
+       * begitu mikrofon dinyalakan, persis yang tidak dikehendaki. */
+      if (seedTurns) {
+        self._send({ clientContent: { turns: seedTurns, turnComplete: false } });
+      }
     };
 
     ws.onmessage = function (ev) {
@@ -278,7 +305,10 @@
 
   /* --------------------------------------------------------------- setup -- */
 
-  function setupMessage(s, resumeHandle) {
+  /* recall: baris rekaman memori dari GLA.Memory.recallLines() (boleh null).
+   * Dipakai buildSystemInstruction() supaya blok RECALL ikut di system
+   * instruction — jalur yang andal, karena system instruction cuma teks. */
+  function setupMessage(s, resumeHandle, recall) {
     var vad = {
       automaticActivityDetection: {
         disabled: false,
@@ -301,7 +331,7 @@
       model: 'models/' + s.model,
       generationConfig: generationConfig,
       systemInstruction: {
-        parts: [{ text: GLA.buildSystemInstruction(s) }]
+        parts: [{ text: GLA.buildSystemInstruction(s, recall) }]
       },
       realtimeInputConfig: vad,
       inputAudioTranscription: {},

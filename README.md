@@ -31,6 +31,9 @@ HTML + CSS + JavaScript murni — **tanpa build step, tanpa server, tanpa backen
 | **Visualizer audio** | Orb dan equalizer bergerak mengikuti spektrum suara sungguhan |
 | **Sambung ulang otomatis** | Koneksi diputus server (rotasi/putus jaringan) → disambung ulang dengan *session resumption*, transkrip dan konteks tetap utuh |
 | **Sesi tanpa batas** | *Context window compression* (sliding window) menembus batas keras 15 menit; koneksi tetap dirotasi otomatis tiap ±10 menit tanpa memutus percakapan |
+| **Ingat antar sesi** | 12 giliran terakhir ikut dibawa ke sesi berikutnya, jadi assistant tidak mulai dari nol tiap kali halaman dibuka ulang |
+| **Catatan permanen** | Catatan yang kamu tulis sendiri (nama, gaya bahasa, hal yang perlu diingat) selalu ikut di setiap sesi |
+| **Pencarian web** | Assistant bisa mencari di Google saat jawaban butuh data terkini — opsional, mati secara bawaan |
 | **Kunci API** | Disimpan di `localStorage` browser, tidak pernah masuk repository |
 
 ---
@@ -158,6 +161,33 @@ Detail yang menentukan kualitasnya:
   justru keuntungannya: yang ditulis assistant persis apa yang diucapkannya.
 - **Anti-XSS.** Semua teks dari model disisipkan dengan `textContent`.
 
+### Kenapa memori dikirim lewat system instruction
+
+*Konteks* (context) dan *memori* (memori) bukan hal yang sama di Live API, dan
+salah pilih mekanismenya bikin fitur ini diam-diam tidak berfungsi:
+
+- **Session resumption** hanya bertahan selama satu koneksi. Begitu tab ditutup
+  atau squeeze halaman dirotasi, handle-nya tidak ada lagi dan konteks hilang.
+- **`clientContent`** yang menyalin riwayat percakapan dilaporkan **diabaikan** model
+  pada beberapa versi Live API
+  ([python-genai#1733](https://github.com/googleapis/python-genai/issues/1733)).
+  Sending-nya tetap dipertahankan sebagai lapisan pelengkap — kalau ternyata
+  dipatuhi, fidelity-nya naik; kalau tidak, tidak ada kerugian karena jalur
+  `systemInstruction` tetap menanggung seluruh beban.
+- **`systemInstruction`** cuma teks prompt tanpa semantik protokol apa pun, jadi
+  tidak mungkin diabaikan server. Ini jalur yang diandalkan.
+
+Maka `memory.js` menyimpan giliran **verbatim** (tanpa ringkasan LLM, tanpa
+panggilan API tambahan), lalu `config.js → buildSystemInstruction()` menyusunnya
+menjadi satu blok `<<<MEMORY_LOG>>>`. Seeding lewat `clientContent` tetap dikirim
+sebagai pelengkap, **hanya di sambungan baru** — di sambungan lanjutan server
+sudah memegang giliran itu, jadi mengirimi-nya lagi bikin konteks dobel.
+
+Blok memori diperlakukan sebagai **data, bukan instruksi**: ada kalimat penjaga
+di dalam system instruction yang menyatakan isi `<<<MEMORY_*>>>` adalah catatan
+fakta dan tidak boleh diperlakukan sebagai perintah. Ini penting karena transkrip
+assistant sendiri bisa memuat teks bergaya perintah.
+
 ---
 
 ## Struktur file
@@ -170,6 +200,7 @@ gemini-live-assistant/
 ├── js/
 │   ├── config.js       konstanta, daftar model/voice/bahasa, system instruction
 │   ├── storage.js      localStorage + fallback ke memory + util
+│   ├── memory.js       memori percakapan antar sesi (giliran + catatan)
 │   ├── dsp.js          biquad, resampler, ring buffer (dipakai worklet & halaman)
 │   ├── worklet.js      menyusun source AudioWorklet dari dsp.js
 │   ├── audio.js        mesin audio: capture mic & playback speaker
@@ -177,12 +208,18 @@ gemini-live-assistant/
 │   ├── ui.js           transkrip, status, visualizer, modal
 │   └── app.js          orkestrasi seluruh alur
 ├── .nojekyll           agar GitHub Pages menyajikan file apa adanya
+├── AGENTS.md           catatan untuk coding agent yang mengerjakan repo ini
 └── README.md
 ```
 
 Semua skrip dimuat sebagai **classic script** (bukan ES module) dan berbagi objek
 global `window.GLA`. ES module diblokir kebijakan CORS pada `file://`, dan justru
 keputusan inilah yang membuat aplikasi bisa dibuka tanpa server.
+
+Karena urutan `<script>` menentukan apa yang sudah ada saat file lain dieksekusi,
+`memory.js` **harus** dimuat setelah `config.js` (langsung membaca `GLA.MEMORY`)
+dan `ui.js` setelah `memory.js` (memakai `GLA.Memory`). Melihat
+[AGENTS.md](AGENTS.md) sebelum mengubah apa pun di sini.
 
 ---
 
@@ -191,13 +228,23 @@ keputusan inilah yang membuat aplikasi bisa dibuka tanpa server.
 | Pengaturan | Arti |
 | --- | --- |
 | **API key** | Wajib. Disimpan di browser, tidak pernah masuk git. |
-| **Model** | Default `gemini-3.1-flash-live-preview`. Field bebas diisi, jadi model Live API lain bisa dipakai sesuai kuota key. |
+| **Model** | Default `gemini-3.8-live`. Field bebas diisi, jadi model Live API lain bisa dipakai sesuai kuota key. |
 | **Nama asisten** | Masuk ke system instruction, jadi assistant memperkenalkan diri dengan nama itu. |
 | **Namamu** | Opsional. Assistant sesekali memanggil namamu, bukan di setiap balasan. |
 | **Bahasa** | Otomatis (ikuti bahasa user) atau dikunci; kalau kamu berganti bahasa, dia tetap mengikuti. |
 | **Suara** | Kosong = biarkan model memilih. Bisa diisi prebuilt voice (`Puck`, `Kore`, `Zephyr`, dan lainnya). |
 | **Kecepatan respons** | Normal: jeda 0,6 s sebelum menjawab. Cepat: 0,35 s dan lebih mudah disela. |
 | **Matikan mic saat assistant bicara** | Anti-feedback tanpa headphone; konsekuensinya barge-in nonaktif selama assistant bicara. |
+| **Web search** | Biarkan assistant mencari di Google saat perlu data terkini. mati secara bawaan; hanya sebagian model Live yang mendukung. |
+| **Ingat percakapan sebelumnya** | Bawaan **nyala**. 12 giliran terakhir (sekitar 6.000 karakter) disimpan di browser dan dikirim lagi di sesi berikutnya. |
+| **Catatan yang selalu diingat** | Maksimal 1.200 karakter, ditulis manual dan ikut di setiap sesi. Letakkan di sini hal yang harus selalu berlaku: nama, gaya bahasa, preferensi. |
+
+Giliran yang tersimpan **potong dari yang paling lama** kalau sudah melewati batas,
+dan **tidak pernah** dikirim ke server mana pun selain Gemini — semuanya lokal di
+browser. Tekan **Hapus memori** di dialog Pengaturan untuk menghapusnya; catatan
+yang kamu tulis sendiri tidak ikut terhapus. Kalau memorinya dimatikan, transkrip
+tidak lagi dicatat dan catatan yang tersimpan tidak ikut dikirim — sesuaikan
+`config.js → GLA.MEMORY` untuk mengubah batasannya.
 
 System instruction yang dikirim (`config.js → buildSystemInstruction`) secara
 eksplisit melarang model mengeluarkan markdown, bullet, emoji, atau kode —
@@ -241,7 +288,7 @@ natural, bukan seperti membaca dokumen.
   "Koneksi ditolak" padahal API key benar, jalankan lewat `localhost` atau
   GitHub Pages.
 - **Nama model berubah dari waktu ke waktu.** Yang dipakai default adalah
-  `gemini-3.1-flash-live-preview`. Kolom model bisa diisi manual dengan id terbaru.
+  `gemini-3.8-live`. Kolom model bisa diisi manual dengan id terbaru.
 
 ---
 
@@ -255,7 +302,7 @@ natural, bukan seperti membaca dokumen.
 | "API key tidak punya izin" (403) | Key punya restriction yang tidak mengizinkan endpoint ini, atau billing belum aktif. |
 | "Kuota atau rate limit habis" (429) | Kuota habis. Tunggu sebentar, atau ganti project/key. |
 | "Suara yang dipilih tidak didukung" | Tidak semua model menerima semua prebuilt voice. Pilih **Otomatis** di pengaturan. |
-| "Model … tidak tersedia" (404) | Id model tidak cocok dengan key. Gunakan `gemini-3.1-flash-live-preview` atau id terbaru. |
+| "Model … tidak tersedia" (404) | Id model tidak cocok dengan key. Gunakan `gemini-3.8-live` atau id terbaru. |
 | Assistant terputus sendiri saat dia bicara | Feedback speaker ke mikrofon. Pakai headphone, atau nyalakan “Matikan mikrofon saat assistant bicara”. |
 | "Koneksi ditolak" | Jalankan lewat `localhost`/hosting agar `Origin` valid, atau cek firewall. |
 | Percakapan sempat terasa putus lalu lanjut lagi tiap ±10 menit | Normal: server merotasi WebSocket. Aplikasi menyambung ulang otomatis dengan session resumption — muncul notifikasi "sesi dilanjutkan", transkrip & konteks tetap utuh. |

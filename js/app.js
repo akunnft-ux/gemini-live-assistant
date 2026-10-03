@@ -281,8 +281,21 @@
       reconnectTimer = null;
       if (!wantSession) return;
       /* handle resumption (kalau ada) ikut di setup → konteks diteruskan.
-       * `fresh` membuang handle: dipakai saat resume ditolak server. */
-      client.connect(settings, fresh ? { fresh: true } : undefined);
+       * `fresh` membuang handle: dipakai saat resume ditolak server.
+       *
+       * `recall: []` di sambungan resume itu disengaja. Server sudah memegang
+       * giliran sesi ini, jadi kalau blok RECALL ikut membawa giliran yang
+       * sama, model melihat setiap kalimat dua kali. Catatan user (memoryNotes)
+       * tetap ikut karena blok itu tidak bergantung pada giliran.
+       *
+       * Kalau `fresh` (resume ditolak → konteks hilang di server), giliran
+       * perlu diantar lagi — dan seed TIDAK dikirim di sini: sudah tercakup
+       * blok RECALL, dan mengirim keduanya berisiko dobel kalau ternyata
+       * clientContent ternyata dipatuhi. */
+      client.connect(
+        settings,
+        fresh ? { fresh: true, recall: buildRecallLines() } : { recall: [] }
+      );
     }, delay);
   }
 
@@ -298,10 +311,29 @@
     tickTimer = setInterval(tick, 1000);
   }
 
+  /* Kumpulkan giliran ke memori antar sesi.
+   *
+   * Dipanggil dari commitUser/commitAi yang sudah memegang teks final giliran
+   * itu. Rekam SEBELUM buffer dikosongkan, dan simpan teksnya saja — suffix
+   * '(terpotong)' itu metadata UI, bukan isi percakapan.
+   *
+   * Direkam begitu pun saat sesi sedang jalan: justru itulah gunanya, supaya
+   * giliran terakhir tetap ada di memori setelah user menekan mikrofon untuk
+   * mengakhiri sesi. Yang dijaga di tempat lain adalah jangan mengirim giliran
+   * itu lagi lewat clientContent saat sambung ulang — itu sudah ditangani
+   * live-client.js lewat opts.fresh. */
+  function remember(role, text) {
+    if (!settings.memoryEnabled) return;
+    var clean = (text || '').trim();
+    if (!clean) return;
+    GLA.Memory.addTurn(role, clean);
+  }
+
   function commitUser() {
     if (!userBuf.trim()) return;
     UI.setPartial('user', userBuf);
     UI.commitPartial('user');
+    remember('user', userBuf);
     userBuf = '';
   }
 
@@ -309,6 +341,7 @@
     if (!aiBuf.trim()) return;
     UI.setPartial('ai', aiBuf);
     UI.commitPartial('ai', suffix);
+    remember('model', aiBuf);
     aiBuf = '';
   }
 
@@ -364,6 +397,32 @@
     }
   }
 
+  /* ------------------------------------------------------------- memory ----- */
+  /* Dua jalur/context yang berbeda, sengaja dipisah:
+   *
+   *  1. buildRecallLines() → masuk ke system instruction (lihat
+   *     config.js buildSystemInstruction). INI yang benar-benar bekerja:
+   *     system instruction cuma teks prompt, tanpa semantik protokol apa pun,
+   *     jadi tidak mungkin diabaikan server.
+   *
+   *  2. buildSeed() → dikirim via clientContent. Best-effort: ada laporan
+   *     bahwa Live API mengabaikan turn yang dikirim lewat jalur ini
+   *     (googleapis/python-genai#1733). Kalau ternyata dipatuhi, fidelity
+   *     naik; kalau tidak, tidak ada kerugian karena jalur 1 tetap menanggung.
+   *     Sifat best-effort inilah alasan seed TIDAK diulang tiap sambung
+   *     ulang — kalau ternyata diam-diam dipakai, duplikatnya baru terasa
+   *     setelah beberapa menit ngobrol. */
+
+  function buildRecallLines() {
+    if (!settings.memoryEnabled) return null;
+    return GLA.Memory.recallLines(GLA.Memory.load(), settings.assistantName);
+  }
+
+  function buildSeed() {
+    if (!settings.memoryEnabled) return null;
+    return GLA.Memory.seedTurns(GLA.Memory.load());
+  }
+
   /* ------------------------------------------------------------- lifecycle - */
 
   function startSession() {
@@ -398,8 +457,14 @@
         var badges = [engine === 'worklet' ? 'AudioWorklet' : 'ScriptProcessor (cadangan)'];
         if (GLA.searchEnabled(settings.searchMode)) badges.push('Web search');
         UI.setEngineBadge(badges.join(' · '));
-        /* fresh: sesi baru → jangan pakai handle resumption sesi lama. */
-        client.connect(settings, { fresh: true });
+        /* fresh: sesi baru → jangan pakai handle resumption sesi lama.
+         * seedTurns hanya ikut di sambungan FRESH. Kalau ikut saat resume,
+         * konteks jadi dobel karena server sudah memegang giliran itu. */
+        client.connect(settings, {
+          fresh: true,
+          seedTurns: buildSeed(),
+          recall: buildRecallLines()
+        });
       })
       .catch(function (err) {
         session = 'idle';
@@ -516,6 +581,24 @@
       GLA._currentSettings = settings;
       UI.fillSettings(settings);
       UI.toast('API key dihapus dari penyimpanan browser.', 'ok');
+    });
+
+    /* Hapus giliran yang terekam. Catatan (memoryNotes) SENGAJA tidak ikut
+     * dihapus: itu ditulis manual oleh user, dan "lupa semua" bukan yang
+     * dia maksud saat menekan "Hapus memori". */
+    document.getElementById('memoryForget').addEventListener('click', function () {
+      var st = GLA.Memory.stats();
+      if (!st.count) {
+        UI.toast('Memori sudah kosong.', 'info');
+        return;
+      }
+      GLA.Memory.clear();
+      UI.syncMemoryControls();
+      UI.toast(
+        st.count + ' giliran dihapus. Catatan yang kamu tulis tetap disimpan.',
+        'ok',
+        4200
+      );
     });
 
     document.getElementById('copyBtn').addEventListener('click', function () {

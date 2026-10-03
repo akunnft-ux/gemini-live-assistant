@@ -66,6 +66,9 @@
       $('fModel').addEventListener('input', function () {
         UI.syncSearchControls();
       });
+      $('fMemory').addEventListener('change', function () {
+        UI.syncMemoryControls();
+      });
 
       el.status = $('statusPill');
       el.statusText = $('statusText');
@@ -340,6 +343,9 @@
 
     /* --------------------------------------------------------- pengaturan -- */
 
+    /* PENTING: setiap field settings yang disimpan HARUS ikut di fillSettings() DAN
+     * readSettings(). Kalau hanya salah satu, field itu hilang setiap kali user
+     * klik Simpan — settings terkikis sedikit demi sedikit tanpa jejak. */
     fillSettings: function (s) {
       $('fApiKey').value = s.apiKey || '';
       $('fModel').value = s.model || GLA.DEFAULT_SETTINGS.model;
@@ -351,11 +357,20 @@
       $('fVad').value = s.vadSensitivity || 'normal';
       $('fWebSearch').checked = !!GLA.searchEnabled(s.searchMode);
       $('fSearchMode').value = s.searchMode === 'always' ? 'always' : 'auto';
+      $('fMemory').checked = s.memoryEnabled !== false;
+      $('fMemoryNotes').value = s.memoryNotes || '';
       this.syncSearchControls();
+      this.syncMemoryControls();
       $('storageWarning').hidden = GLA.Storage.isPersistent;
     },
 
     readSettings: function () {
+      /* Catatan dipangkas dari ATAS supaya bagian bawah — yang biasanya
+       * ditulis belakangan dan paling relevan — tetap utuh. */
+      var notes = $('fMemoryNotes').value.trim();
+      if (notes.length > GLA.MEMORY.notesMax) {
+        notes = notes.slice(-GLA.MEMORY.notesMax);
+      }
       return {
         apiKey: $('fApiKey').value.trim(),
         model: $('fModel').value.trim() || GLA.DEFAULT_SETTINGS.model,
@@ -365,7 +380,9 @@
         userName: $('fUserName').value.trim(),
         muteMicWhileSpeaking: $('fMuteWhileSpeaking').checked,
         vadSensitivity: $('fVad').value,
-        searchMode: $('fWebSearch').checked ? $('fSearchMode').value : 'off'
+        searchMode: $('fWebSearch').checked ? $('fSearchMode').value : 'off',
+        memoryEnabled: $('fMemory').checked,
+        memoryNotes: notes
       };
     },
 
@@ -384,6 +401,35 @@
           model +
           '" tidak mendukung web search. Pilih model Live lain atau matikan fitur ini.';
       }
+    },
+
+    /* Sama seperti syncSearchControls: kolom catatan tidak berguna saat memorinya
+     * mati, jadi dikabut supaya tidak menyesatkan. */
+    syncMemoryControls: function () {
+      var on = $('fMemory').checked;
+      var notes = $('fMemoryNotes');
+      notes.disabled = !on;
+      notes.style.opacity = on ? '' : '0.45';
+      $('memoryForget').disabled = !on;
+
+      var hint = $('memoryHint');
+      var st = GLA.Memory.stats();
+      if (!st.persistent) {
+        hint.textContent =
+          'Browser ini tidak menyediakan penyimpanan permanen — memori hanya ' +
+          'bertahan selama tab ini terbuka, lalu hilang saat halaman ditutup ' +
+          'atau dimuat ulang. Jalankan lewat server lokal atau GitHub Pages ' +
+          'supaya memorinya bertahan.';
+        return;
+      }
+      hint.textContent = on
+        ? 'Tersimpan hanya di browser ini. ' +
+          st.count +
+          ' dari ' +
+          GLA.MEMORY.turnsMax +
+          ' giliran terakhir ikut dikirim ke Google bersama percakapan ini.'
+        : 'Matikan: transkrip tidak lagi dicatat dan catatan yang tersimpan ' +
+          'tidak ikut dikirim. Tekan "Simpan" untuk menerapkan.';
     },
 
     openSettings: function () {
